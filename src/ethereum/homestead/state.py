@@ -19,10 +19,11 @@ There is a distinction between an account that does not exist and
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
-from ethereum.base_types import U256, Bytes, Uint, modify
-from ethereum.utils.ensure import ensure
+from ethereum_types.bytes import Bytes
+from ethereum_types.frozen import modify
+from ethereum_types.numeric import U256, Uint
 
-from .eth_types import EMPTY_ACCOUNT, Account, Address, Root
+from .fork_types import EMPTY_ACCOUNT, Account, Address, Root
 from .trie import EMPTY_TRIE_ROOT, Trie, copy_trie, root, trie_get, trie_set
 
 
@@ -275,7 +276,7 @@ def storage_root(state: State, address: Address) -> Root:
     root : `Root`
         Storage root of the account.
     """
-    assert state._snapshots == []
+    assert not state._snapshots
     if address in state._storage_tries:
         return root(state._storage_tries[address])
     else:
@@ -296,7 +297,7 @@ def state_root(state: State) -> Root:
     root : `Root`
         The state root.
     """
-    assert state._snapshots == []
+    assert not state._snapshots
 
     def get_storage_root(address: Address) -> Root:
         return storage_root(state, address)
@@ -364,7 +365,8 @@ def move_ether(
     """
 
     def reduce_sender_balance(sender: Account) -> None:
-        ensure(sender.balance >= amount, AssertionError)
+        if sender.balance < amount:
+            raise AssertionError
         sender.balance -= amount
 
     def increase_recipient_balance(recipient: Account) -> None:
@@ -426,7 +428,7 @@ def increment_nonce(state: State, address: Address) -> None:
     """
 
     def increase_nonce(sender: Account) -> None:
-        sender.nonce += 1
+        sender.nonce += Uint(1)
 
     modify_state(state, address, increase_nonce)
 

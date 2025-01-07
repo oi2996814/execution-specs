@@ -5,6 +5,7 @@ Tool to create a new fork using the latest fork
 import argparse
 import fnmatch
 import os
+import re
 from shutil import copytree
 from typing import Tuple
 
@@ -35,8 +36,7 @@ The following will have to however, be updated manually
     3. Package Names under setup.cfg
     4. Add the new fork to the monkey_patch() function in \
 src/ethereum_optimized/__init__.py
-    5. Adjust the underline in fork/__init__.py as well as \
-__init__.py, address.py, message.py in fork/utils
+    5. Adjust the underline in fork/__init__.py
 """
 
 parser = argparse.ArgumentParser(
@@ -52,14 +52,15 @@ parser.add_argument("--to_test", dest="to_test", type=str)
 
 def find_replace(dir: str, find: str, replace: str, file_pattern: str) -> None:
     """
-    Replace the occurrance of a certain text in files with a new text
+    Replace the occurrence of a certain text in files with a new text
     """
     for path, _, files in os.walk(dir):
         for filename in fnmatch.filter(files, file_pattern):
             file_path = os.path.join(path, filename)
             with open(file_path, "r+b") as f:
                 s = f.read()
-                s = s.replace(find.encode(), replace.encode())
+                find_pattern = (r"\b" + re.escape(find) + r"\b").encode()
+                s = re.sub(find_pattern, replace.encode(), s)
                 f.seek(0)
                 f.write(s)
                 f.truncate()
@@ -78,7 +79,6 @@ class ForkCreator:
         to_test_names: str,
     ):
         self.package_folder = "src/ethereum"
-        self.optimized_package_folder = "src/ethereum_optimized"
         self.test_folder = "tests"
 
         # Get the fork specific data for from fork
@@ -86,7 +86,6 @@ class ForkCreator:
             self.from_fork,
             self.from_package,
             self.from_path,
-            self.from_optimized_path,
             self.from_test_path,
         ) = self.get_fork_paths(from_fork)
 
@@ -95,7 +94,6 @@ class ForkCreator:
             self.to_fork,
             self.to_package,
             self.to_path,
-            self.to_optimized_path,
             self.to_test_path,
         ) = self.get_fork_paths(to_fork)
 
@@ -109,16 +107,14 @@ class ForkCreator:
         name = fork
         package = name.replace(" ", "_").lower()
         path = os.path.join(self.package_folder, package)
-        optimized_path = os.path.join(self.optimized_package_folder, package)
         test_path = os.path.join(self.test_folder, package)
-        return (name, package, path, optimized_path, test_path)
+        return (name, package, path, test_path)
 
     def duplicate_fork(self) -> None:
         """
         Copy the relevant files/folders from the old fork
         """
         copytree(self.from_path, self.to_path)
-        copytree(self.from_optimized_path, self.to_optimized_path)
         copytree(self.from_test_path, self.to_test_path)
 
     def update_new_fork_contents(self) -> None:
@@ -134,20 +130,6 @@ class ForkCreator:
         find_replace(self.to_path, self.from_package, self.to_package, "*.py")
         find_replace(
             self.to_path, self.from_fork.lower(), self.to_fork.lower(), "*.py"
-        )
-
-        # Update optimized source code
-        find_replace(
-            self.to_optimized_path, self.from_fork, self.to_fork, "*.py"
-        )
-        find_replace(
-            self.to_optimized_path, self.from_package, self.to_package, "*.py"
-        )
-        find_replace(
-            self.to_optimized_path,
-            self.from_fork.lower(),
-            self.to_fork.lower(),
-            "*.py",
         )
 
         # Update test files starting with the names used in the test fixtures
@@ -185,13 +167,13 @@ def main() -> None:
 Fork `{fork}` has been successfully created.
 
 PLEASE REMEMBER TO UPDATE THE FOLLOWING MANUALLY:
-    1. The fork number and MAINNET_FORK_BLOCK in __init__.py
+    1. The fork number and MAINNET_FORK_BLOCK in __init__.py. \
+If you are proposing a new EIP, please set MAINNET_FORK_BLOCK to None.
     2. Any absolute package imports from other forks. Eg. in trie.py
     3. Package Names under setup.cfg
     4. Add the new fork to the monkey_patch() function in \
 src/ethereum_optimized/__init__.py
-    5. Adjust the underline in src/{package}/__init__.py as well as \
-__init__.py, address.py, message.py in src/{package}/utils
+    5. Adjust the underline in src/{package}/__init__.py
 """.format(
         fork=fork_creator.to_fork,
         package=fork_creator.to_package,

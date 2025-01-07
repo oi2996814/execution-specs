@@ -1,15 +1,19 @@
 # Ethereum Execution Client Specifications
 
+[![GitPOAP Badge](https://public-api.gitpoap.io/v1/repo/ethereum/execution-specs/badge)](https://www.gitpoap.io/gh/ethereum/execution-specs)
+
 ## Description
 
-This repository contains the consensus specifications related to the Ethereum execution client, specifically the [pyspec](/src/ethereum/frontier/spec.py) and specifications for [network upgrades](/network-upgrades). The [JSON-RPC API specification](https://github.com/ethereum/execution-apis) can be found in a separate repository.
+This repository contains the specifications related to the Ethereum execution client, specifically the [pyspec](/src/ethereum/frontier/fork.py) and specifications for [network upgrades](/network-upgrades). The [JSON-RPC API specification](https://github.com/ethereum/execution-apis) can be found in a separate repository.
 
 ### Ethereum Protocol Releases
 
 | Version and Code Name | Block No. | Released | Incl EIPs | Specs | Blog |
 |-----------------------|-----------|----------|-----------|-------|-------|
-| Shanghai | TBD | TBD | TBD| [Specification](https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/shanghai.md) | |
-| Paris | TBD | TBD | TBD| [Specification](https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/paris.md) | |
+| Cancun | 19426587 | 2024-03-13<br />(1710338135) | [EIP-1153](https://eips.ethereum.org/EIPS/eip-1153) </br> [EIP-4788](https://eips.ethereum.org/EIPS/eip-4788)</br> [EIP-4844](https://eips.ethereum.org/EIPS/eip-4844)</br> [EIP-5656](https://eips.ethereum.org/EIPS/eip-5656)</br> [EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)</br> [EIP-7516](https://eips.ethereum.org/EIPS/eip-7516)| [Specification](https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/cancun.md) | [Blog](https://blog.ethereum.org/2024/02/27/dencun-mainnet-announcement) |
+| Shanghai | 17034870 | 2023-04-12<br/>(1681338455) | [EIP-3651](https://eips.ethereum.org/EIPS/eip-3651) <br/> [EIP-3855](https://eips.ethereum.org/EIPS/eip-3855) <br/> [EIP-3860](https://eips.ethereum.org/EIPS/eip-3860) <br/> [EIP-4895](https://eips.ethereum.org/EIPS/eip-4895) | [Specification](https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/shanghai.md) | [Blog](https://blog.ethereum.org/2023/03/28/shapella-mainnet-announcement) |
+| Paris | 15537394 | 2022-09-15 | [EIP-3675](https://eips.ethereum.org/EIPS/eip-3675) <br/> [EIP-4399](https://eips.ethereum.org/EIPS/eip-4399) | [Specification](https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/paris.md) | [Blog](https://blog.ethereum.org/2022/08/24/mainnet-merge-announcement) |
+| Gray Glacier | 15050000 | 2022-06-30 | [EIP-5133](https://eips.ethereum.org/EIPS/eip-5133) | [Specification](./network-upgrades/mainnet-upgrades/gray-glacier.md) | [Blog](https://blog.ethereum.org/2022/06/16/gray-glacier-announcement/) |
 | Arrow Glacier | 13773000 | 2021-12-09 | [EIP-4345](https://eips.ethereum.org/EIPS/eip-4345) | [Specification](./network-upgrades/mainnet-upgrades/arrow-glacier.md) | [Blog](https://blog.ethereum.org/2021/11/10/arrow-glacier-announcement/) |
 | London | 12965000 |  2021-08-05 | [EIP-1559](https://eips.ethereum.org/EIPS/eip-1559) <br> [EIP-3198](https://eips.ethereum.org/EIPS/eip-3198) <br/> [EIP-3529](https://eips.ethereum.org/EIPS/eip-3529) <br/> [EIP-3541](https://eips.ethereum.org/EIPS/eip-3541) <br> [EIP-3554](https://eips.ethereum.org/EIPS/eip-3554)| [Specification](https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/london.md) | [Blog](https://blog.ethereum.org/2021/07/15/london-mainnet-announcement/) |
 | Berlin | 12244000 | 2021-04-15 | [EIP-2565](https://eips.ethereum.org/EIPS/eip-2565) <br/> [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929) <br/> [EIP-2718](https://eips.ethereum.org/EIPS/eip-2718) <br/> [EIP-2930](https://eips.ethereum.org/EIPS/eip-2930) | ~[HFM-2070](https://eips.ethereum.org/EIPS/eip-2070)~ <br/> [Specification](https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/berlin.md) | [Blog](https://blog.ethereum.org/2021/03/08/ethereum-berlin-upgrade-announcement/) |
@@ -26,16 +30,21 @@ This repository contains the consensus specifications related to the Ethereum ex
 | Frontier Thawing | 200000 | 2015-09-07 | | | [Blog](https://blog.ethereum.org/2015/08/04/the-thawing-frontier/) |
 | Frontier | 1 | 2015-07-30 | | | [Blog](https://blog.ethereum.org/2015/07/22/frontier-is-coming-what-to-expect-and-how-to-prepare/) |
 
+*Note:* Starting with Paris, updates are no longer rolled out based on block numbers. Paris was enabled once proof-of-work Total Difficulty reached 58750000000000000000000. As of Shanghai (at 1681338455), upgrade activation is based on timestamps.
+
 Some clarifications were enabled without protocol releases:
 
 | EIP | Block No. |
 |-----|-----------|
 | [EIP-2681](https://eips.ethereum.org/EIPS/eip-2681) | 0 |
 | [EIP-3607](https://eips.ethereum.org/EIPS/eip-3607) | 0 |
+| [EIP-7523](https://eips.ethereum.org/EIPS/eip-7523) | 15537394 |
+| [EIP-7610](https://github.com/ethereum/EIPs/pull/8161) | 0 |
 
-## Consensus Specification (work-in-progress)
 
-The consensus specification is a python implementation of Ethereum that prioritizes readability and simplicity. It [will] accompanied by both narrative and API level documentation of the various components written in restructured text and rendered using Sphinx....
+## Execution Specification (work-in-progress)
+
+The execution specification is a python implementation of Ethereum that prioritizes readability and simplicity. It will accompanied by both narrative and API level documentation of the various components written in markdown and rendered using docc...
 
  * [Rendered specification](https://ethereum.github.io/execution-specs/)
 
@@ -43,7 +52,7 @@ The consensus specification is a python implementation of Ethereum that prioriti
 
 The Ethereum specification is maintained as a Python library, for better integration with tooling and testing.
 
-Requires Python 3.8+
+Requires Python 3.10+
 
 ### Building
 
@@ -55,97 +64,6 @@ $ tox -e doc
 
 The path to the generated HTML will be printed to the console.
 
-#### Live Preview
+# License
 
-A live preview of the documentation can be viewed locally on port `8000` with the following command:
-
-```bash
-$ tox -e doc-autobuild
-```
-
-### Development
-
-Running the tests necessary to merge into the repository requires:
-
- * Python 3.8.x (not 3.9 or later), and
- * [PyPy 7.3.x](https://www.pypy.org/).
- * `geth` installed and present in `$PATH`
-
-These version ranges are necessary because, at the time of writing, PyPy is only compatible with Python 3.7.
-
-`execution-specs` depends on a submodule that contains common tests that are run across all clients, so we need to clone the repo with the --recursive flag. Example:
-```bash
-$ git clone --recursive https://github.com/ethereum/execution-specs.git
-```
-
-Or, if you've already cloned the repository, you can fetch the submodules with:
-
-```bash
-$ git submodule update --init --recursive
-```
-
-The tests can be run with:
-```bash
-$ tox
-```
-
-The development tools can also be run outside of `tox`, and can automatically reformat the code:
-
-```bash
-$ pip install -e ".[doc,lint,test]" # Installs eth1spec, and development tools.
-$ isort src                         # Organizes imports.
-$ black src                         # Formats code.
-$ flake8                            # Reports style/spelling/documentation errors.
-$ mypy src                          # Verifies type annotations.
-$ pytest -n 4                       # Runs tests parallelly.
-$ pytest -m "not slow"              # Runs tests which execute quickly.
-```
-
-It is recommended to use a [virtual environment](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment) to keep your system Python installation clean.
-
-
-A trace of the EVM execution for any test case can be obtained by providing the `--evm-trace` argument to pytest.
-Note: Make sure to run the EVM trace on a small number of tests at a time. The log might otherwise get very big.
-Below is an example.
-
-```bash
-pytest tests/frontier/test_state_transition.py -k 'test_general_state_tests_new' --evm-trace
-```
-
-
-## Contribution Guidelines
-
-This specification aims to be:
-
-1. **Correct** - Describe the _intended_ behavior of the Ethereum blockchain, and any deviation from that is a bug.
-2. **Complete** - Capture the entirety of _consensus critical_ parts of Ethereum.
-3. **Accessible** - Prioritize readability, clarity, and plain language over performance and brevity.
-
-### Spelling
-
-Attempt to use descriptive English words (or _very common_ abbreviations) in documentation and identifiers. If necessary, there is a custom dictionary `whitelist.txt`.
-
-
-## CLI Utilities `ethereum_spec_tools`
-
-### New Fork Tool
-This tool can be used to creates the base code for a new fork by using the existing code from a given fork.
-
-The command takes 4 arguments, 2 of which are optional
- * from_fork: The fork name from which the code is to be duplicated. Eg. - "Tangerine Whistle"
- * to_fork: The fork name of the new fork Eg - "Spurious Dragon"
- * from_test (Optional): Name of the from fork within the test fixtures in case it is different from fork name. Eg. - "EIP150"
- * to_test (Optional): Name of the to fork within the test fixtures in case it is different from fork name Eg - "EIP158"
-
-As an example, if one wants to create baseline code for the `Spurious Dragon` fork from the `Tangerine Whistle` one
-
-```bash
-ethereum-spec-new-fork --from_fork="Tangerine Whistle" --to_fork="Spurious Dragon" --from_test=EIP150 --to_test=EIP158
-```
-
-The following will have to however, be updated manually
- 1. The fork number and MAINNET_FORK_BLOCK in __init__.py
- 2. Any absolute package imports from other forks eg. in trie.py
- 3. Package names under setup.cfg
- 4. Add the new fork to the monkey_patch() function in src/ethereum_optimized/__init__.py
- 5. Adjust the underline in fork/__init__.py as well as __init__.py, address.py, message.py in fork/utils
+The Ethereum Execution Layer Specification code is licensed under the [Creative Commons Zero v1.0 Universal](https://github.com/ethereum/execution-specs/blob/master/LICENSE.md).

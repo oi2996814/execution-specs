@@ -9,20 +9,30 @@ Ethereum Logs Bloom
 Introduction
 ------------
 
-Logs Bloom related functionalities used in Ethereum.
+This modules defines functions for calculating bloom filters of logs. For the
+general theory of bloom filters see e.g. `Wikipedia
+<https://en.wikipedia.org/wiki/Bloom_filter>`_. Bloom filters are used to allow
+for efficient searching of logs by address and/or topic, by rapidly
+eliminating blocks and receipts from their search.
 """
 
 from typing import Tuple
 
-from ethereum.base_types import Uint
+from ethereum_types.numeric import Uint
+
 from ethereum.crypto.hash import keccak256
 
-from .eth_types import Bloom, Log
+from .blocks import Log
+from .fork_types import Bloom
 
 
 def add_to_bloom(bloom: bytearray, bloom_entry: bytes) -> None:
     """
     Add a bloom entry to the bloom filter (`bloom`).
+
+    The number of hash functions used is 3. They are calculated by taking the
+    least significant 11 bits from the first 3 16-bit words of the
+    `keccak_256()` hash of `bloom_entry`.
 
     Parameters
     ----------
@@ -38,10 +48,10 @@ def add_to_bloom(bloom: bytearray, bloom_entry: bytes) -> None:
         # (16 bits), and set this bit in bloom bytearray.
         # The obtained bit is 0-indexed in the bloom filter from the least
         # significant bit to the most significant bit.
-        bit_to_set = Uint.from_be_bytes(hash[idx : idx + 2]) & 0x07FF
+        bit_to_set = Uint.from_be_bytes(hash[idx : idx + 2]) & Uint(0x07FF)
         # Below is the index of the bit in the bytearray (where 0-indexed
         # byte is the most significant byte)
-        bit_index = 0x07FF - bit_to_set
+        bit_index = 0x07FF - int(bit_to_set)
 
         byte_index = bit_index // 8
         bit_value = 1 << (7 - (bit_index % 8))
@@ -51,6 +61,8 @@ def add_to_bloom(bloom: bytearray, bloom_entry: bytes) -> None:
 def logs_bloom(logs: Tuple[Log, ...]) -> Bloom:
     """
     Obtain the logs bloom from a list of log entries.
+
+    The address and each topic of a log are added to the bloom filter.
 
     Parameters
     ----------

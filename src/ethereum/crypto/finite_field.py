@@ -7,9 +7,8 @@ Finite Fields
 
 from typing import Iterable, List, Tuple, Type, TypeVar, cast
 
+from ethereum_types.bytes import Bytes, Bytes32
 from typing_extensions import Protocol
-
-from ..base_types import Bytes, Bytes32
 
 F = TypeVar("F", bound="Field")
 
@@ -201,7 +200,7 @@ class GaloisField(tuple, Field):
     tuple of the non-leading coefficients of the defining polynomial. For
     example `x^3 + 2x^2 + 3x + 4` is `(2, 3, 4)`.
 
-    In practice the polynomial is likely to be be sparse and you should overload
+    In practice the polynomial is likely to be sparse and you should overload
     the `__mul__()` function to take advantage of this fact.
     """
 
@@ -317,7 +316,7 @@ class GaloisField(tuple, Field):
 
     def multiplicative_inverse(self: U) -> U:
         """
-        Calculate the multiplicative inverse. Uses the Euclidian algorithm.
+        Calculate the multiplicative inverse. Uses the Euclidean algorithm.
         """
         x2: List[int]
         p = self.PRIME
@@ -375,6 +374,9 @@ class GaloisField(tuple, Field):
             exponent //= 2
         return res
 
+    def __ipow__(self: U, right: int) -> U:
+        return self.__pow__(right)
+
     @classmethod
     def calculate_frobenius_coefficients(cls: Type[U]) -> Tuple[U, ...]:
         """
@@ -396,6 +398,6 @@ class GaloisField(tuple, Field):
         """
         ans = self.from_int(0)
         a: int
-        for (i, a) in enumerate(self):
+        for i, a in enumerate(self):
             ans += cast(U, self.FROBENIUS_COEFFICIENTS[i]).scalar_mul(a)
         return ans

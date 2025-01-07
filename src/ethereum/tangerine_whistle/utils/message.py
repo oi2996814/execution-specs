@@ -1,6 +1,6 @@
 """
-Tangerine Whistle Utility Functions For The Message Data-structure
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Hardfork Utility Functions For The Message Data-structure
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. contents:: Table of Contents
     :backlinks: none
@@ -14,9 +14,10 @@ specification.
 """
 from typing import Optional, Union
 
-from ethereum.base_types import U256, Bytes, Bytes0, Uint
+from ethereum_types.bytes import Bytes, Bytes0
+from ethereum_types.numeric import U256, Uint
 
-from ..eth_types import Address
+from ..fork_types import Address
 from ..state import get_account
 from ..vm import Environment, Message
 from .address import compute_contract_address
@@ -27,7 +28,7 @@ def prepare_message(
     target: Union[Bytes0, Address],
     value: U256,
     data: Bytes,
-    gas: U256,
+    gas: Uint,
     env: Environment,
     code_address: Optional[Address] = None,
     should_transfer_value: bool = True,
@@ -64,7 +65,7 @@ def prepare_message(
     if isinstance(target, Bytes0):
         current_target = compute_contract_address(
             caller,
-            get_account(env.state, caller).nonce - U256(1),
+            get_account(env.state, caller).nonce - Uint(1),
         )
         msg_data = Bytes(b"")
         code = data
@@ -88,4 +89,5 @@ def prepare_message(
         current_target=current_target,
         code_address=code_address,
         should_transfer_value=should_transfer_value,
+        parent_evm=None,
     )

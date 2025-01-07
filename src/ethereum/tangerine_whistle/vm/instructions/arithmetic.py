@@ -12,7 +12,8 @@ Introduction
 Implementations of the EVM Arithmetic instructions.
 """
 
-from ethereum.base_types import U255_CEIL_VALUE, U256, U256_CEIL_VALUE, Uint
+from ethereum_types.numeric import U256, Uint
+
 from ethereum.utils.numeric import get_sign
 
 from .. import Evm
@@ -22,7 +23,7 @@ from ..gas import (
     GAS_LOW,
     GAS_MID,
     GAS_VERY_LOW,
-    subtract_gas,
+    charge_gas,
 )
 from ..stack import pop, push
 
@@ -37,22 +38,21 @@ def add(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `2`.
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `3`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_VERY_LOW)
-
+    # STACK
     x = pop(evm.stack)
     y = pop(evm.stack)
+
+    # GAS
+    charge_gas(evm, GAS_VERY_LOW)
+
+    # OPERATION
     result = x.wrapping_add(y)
 
     push(evm.stack, result)
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def sub(evm: Evm) -> None:
@@ -65,22 +65,21 @@ def sub(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `2`.
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `3`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_VERY_LOW)
-
+    # STACK
     x = pop(evm.stack)
     y = pop(evm.stack)
+
+    # GAS
+    charge_gas(evm, GAS_VERY_LOW)
+
+    # OPERATION
     result = x.wrapping_sub(y)
 
     push(evm.stack, result)
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def mul(evm: Evm) -> None:
@@ -93,22 +92,21 @@ def mul(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `2`.
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `5`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_LOW)
-
+    # STACK
     x = pop(evm.stack)
     y = pop(evm.stack)
+
+    # GAS
+    charge_gas(evm, GAS_LOW)
+
+    # OPERATION
     result = x.wrapping_mul(y)
 
     push(evm.stack, result)
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def div(evm: Evm) -> None:
@@ -121,17 +119,15 @@ def div(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `2`.
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `5`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_LOW)
-
+    # STACK
     dividend = pop(evm.stack)
     divisor = pop(evm.stack)
+
+    # GAS
+    charge_gas(evm, GAS_LOW)
+
+    # OPERATION
     if divisor == 0:
         quotient = U256(0)
     else:
@@ -139,7 +135,11 @@ def div(evm: Evm) -> None:
 
     push(evm.stack, quotient)
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
+
+
+U255_CEIL_VALUE = 2**255
 
 
 def sdiv(evm: Evm) -> None:
@@ -152,18 +152,15 @@ def sdiv(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `2`.
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `5`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_LOW)
-
+    # STACK
     dividend = pop(evm.stack).to_signed()
     divisor = pop(evm.stack).to_signed()
 
+    # GAS
+    charge_gas(evm, GAS_LOW)
+
+    # OPERATION
     if divisor == 0:
         quotient = 0
     elif dividend == -U255_CEIL_VALUE and divisor == -1:
@@ -174,7 +171,8 @@ def sdiv(evm: Evm) -> None:
 
     push(evm.stack, U256.from_signed(quotient))
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def mod(evm: Evm) -> None:
@@ -187,17 +185,15 @@ def mod(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `2`.
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `5`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_LOW)
-
+    # STACK
     x = pop(evm.stack)
     y = pop(evm.stack)
+
+    # GAS
+    charge_gas(evm, GAS_LOW)
+
+    # OPERATION
     if y == 0:
         remainder = U256(0)
     else:
@@ -205,7 +201,8 @@ def mod(evm: Evm) -> None:
 
     push(evm.stack, remainder)
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def smod(evm: Evm) -> None:
@@ -218,18 +215,15 @@ def smod(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `2`.
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `5`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_LOW)
-
+    # STACK
     x = pop(evm.stack).to_signed()
     y = pop(evm.stack).to_signed()
 
+    # GAS
+    charge_gas(evm, GAS_LOW)
+
+    # OPERATION
     if y == 0:
         remainder = 0
     else:
@@ -237,7 +231,8 @@ def smod(evm: Evm) -> None:
 
     push(evm.stack, U256.from_signed(remainder))
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def addmod(evm: Evm) -> None:
@@ -250,19 +245,16 @@ def addmod(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `3`.
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `8`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_MID)
-
+    # STACK
     x = Uint(pop(evm.stack))
     y = Uint(pop(evm.stack))
     z = Uint(pop(evm.stack))
 
+    # GAS
+    charge_gas(evm, GAS_MID)
+
+    # OPERATION
     if z == 0:
         result = U256(0)
     else:
@@ -270,7 +262,8 @@ def addmod(evm: Evm) -> None:
 
     push(evm.stack, result)
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def mulmod(evm: Evm) -> None:
@@ -283,19 +276,16 @@ def mulmod(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `3`.
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `8`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_MID)
-
+    # STACK
     x = Uint(pop(evm.stack))
     y = Uint(pop(evm.stack))
     z = Uint(pop(evm.stack))
 
+    # GAS
+    charge_gas(evm, GAS_MID)
+
+    # OPERATION
     if z == 0:
         result = U256(0)
     else:
@@ -303,7 +293,8 @@ def mulmod(evm: Evm) -> None:
 
     push(evm.stack, result)
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def exp(evm: Evm) -> None:
@@ -316,28 +307,27 @@ def exp(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `2`.
     """
+    # STACK
     base = Uint(pop(evm.stack))
     exponent = Uint(pop(evm.stack))
 
-    gas_used = GAS_EXPONENTIATION
-    if exponent != 0:
-        # This is equivalent to 1 + floor(log(y, 256)). But in python the log
-        # function is inaccurate leading to wrong results.
-        exponent_bits = exponent.bit_length()
-        exponent_bytes = (exponent_bits + 7) // 8
-        gas_used += GAS_EXPONENTIATION_PER_BYTE * exponent_bytes
-    evm.gas_left = subtract_gas(evm.gas_left, gas_used)
+    # GAS
+    # This is equivalent to 1 + floor(log(y, 256)). But in python the log
+    # function is inaccurate leading to wrong results.
+    exponent_bits = exponent.bit_length()
+    exponent_bytes = (exponent_bits + Uint(7)) // Uint(8)
+    charge_gas(
+        evm, GAS_EXPONENTIATION + GAS_EXPONENTIATION_PER_BYTE * exponent_bytes
+    )
 
-    result = U256(pow(base, exponent, U256_CEIL_VALUE))
+    # OPERATION
+    result = U256(pow(base, exponent, Uint(U256.MAX_VALUE) + Uint(1)))
 
     push(evm.stack, result)
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def signextend(evm: Evm) -> None:
@@ -350,24 +340,20 @@ def signextend(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `2`.
-    :py:class:`~ethereum.tangerine_whistle.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `5`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_LOW)
-
-    # byte_num would be 0-indexed when inserted to the stack.
+    # STACK
     byte_num = pop(evm.stack)
     value = pop(evm.stack)
 
-    if byte_num > 31:
+    # GAS
+    charge_gas(evm, GAS_LOW)
+
+    # OPERATION
+    if byte_num > U256(31):
         # Can't extend any further
         result = value
     else:
-        # U256(0).to_be_bytes() gives b'' instead b'\x00'. # noqa: SC100
+        # U256(0).to_be_bytes() gives b'' instead b'\x00'.
         value_bytes = bytes(value.to_be_bytes32())
         # Now among the obtained value bytes, consider only
         # N `least significant bytes`, where N is `byte_num + 1`.
@@ -376,11 +362,12 @@ def signextend(evm: Evm) -> None:
         if sign_bit == 0:
             result = U256.from_be_bytes(value_bytes)
         else:
-            num_bytes_prepend = 32 - (byte_num + 1)
+            num_bytes_prepend = U256(32) - (byte_num + U256(1))
             result = U256.from_be_bytes(
                 bytearray([0xFF] * num_bytes_prepend) + value_bytes
             )
 
     push(evm.stack, result)
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)

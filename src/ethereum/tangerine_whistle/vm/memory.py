@@ -11,38 +11,14 @@ Introduction
 
 EVM memory operations.
 """
-from ethereum.utils.numeric import ceil32
+from ethereum_types.bytes import Bytes
+from ethereum_types.numeric import U256, Uint
 
-from ...base_types import U256, Bytes, Uint
-
-
-def extend_memory(memory: bytearray, start_position: Uint, size: U256) -> None:
-    """
-    Extends the size of the memory and
-    substracts the gas amount to extend memory.
-
-    Parameters
-    ----------
-    memory :
-        Memory contents of the EVM.
-    start_position :
-        Starting pointer to the memory.
-    size :
-        Amount of bytes by which the memory needs to be extended.
-    """
-    if size == 0:
-        return None
-    memory_size = Uint(len(memory))
-    before_size = ceil32(memory_size)
-    after_size = ceil32(start_position + size)
-    if after_size <= before_size:
-        return None
-    size_to_extend = after_size - memory_size
-    memory += b"\x00" * size_to_extend
+from ethereum.utils.byte import right_pad_zero_bytes
 
 
 def memory_write(
-    memory: bytearray, start_position: Uint, value: Bytes
+    memory: bytearray, start_position: U256, value: Bytes
 ) -> None:
     """
     Writes to memory.
@@ -56,12 +32,11 @@ def memory_write(
     value :
         Data to write to memory.
     """
-    for idx, byte in enumerate(value):
-        memory[start_position + idx] = byte
+    memory[start_position : int(start_position) + len(value)] = value
 
 
 def memory_read_bytes(
-    memory: bytearray, start_position: Uint, size: U256
+    memory: bytearray, start_position: U256, size: U256
 ) -> bytearray:
     """
     Read bytes from memory.
@@ -80,4 +55,27 @@ def memory_read_bytes(
     data_bytes :
         Data read from memory.
     """
-    return memory[start_position : start_position + size]
+    return memory[start_position : Uint(start_position) + Uint(size)]
+
+
+def buffer_read(buffer: Bytes, start_position: U256, size: U256) -> Bytes:
+    """
+    Read bytes from a buffer. Padding with zeros if necessary.
+
+    Parameters
+    ----------
+    buffer :
+        Memory contents of the EVM.
+    start_position :
+        Starting pointer to the memory.
+    size :
+        Size of the data that needs to be read from `start_position`.
+
+    Returns
+    -------
+    data_bytes :
+        Data read from memory.
+    """
+    return right_pad_zero_bytes(
+        buffer[start_position : Uint(start_position) + Uint(size)], size
+    )

@@ -11,7 +11,8 @@ Introduction
 
 Implementations of the EVM storage related instructions.
 """
-from ethereum.utils.ensure import ensure
+
+from ethereum_types.numeric import Uint
 
 from ...state import get_storage, get_storage_original, set_storage
 from .. import Evm
@@ -22,7 +23,7 @@ from ..gas import (
     GAS_STORAGE_CLEAR_REFUND,
     GAS_STORAGE_SET,
     GAS_STORAGE_UPDATE,
-    subtract_gas,
+    charge_gas,
 )
 from ..stack import pop, push
 
@@ -37,21 +38,20 @@ def sload(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.muir_glacier.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `1`.
-    :py:class:`~ethereum.muir_glacier.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `50`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_SLOAD)
-
+    # STACK
     key = pop(evm.stack).to_be_bytes32()
+
+    # GAS
+    charge_gas(evm, GAS_SLOAD)
+
+    # OPERATION
     value = get_storage(evm.env.state, evm.message.current_target, key)
 
     push(evm.stack, value)
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def sstore(evm: Evm) -> None:
@@ -63,32 +63,25 @@ def sstore(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.muir_glacier.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `2`.
-    :py:class:`~ethereum.muir_glacier.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `20000`.
     """
-    ensure(evm.gas_left > GAS_CALL_STIPEND, OutOfGasError)
-    ensure(not evm.message.is_static, WriteInStaticContext)
-
+    # STACK
     key = pop(evm.stack).to_be_bytes32()
     new_value = pop(evm.stack)
-    current_value = get_storage(evm.env.state, evm.message.current_target, key)
+    if evm.gas_left <= GAS_CALL_STIPEND:
+        raise OutOfGasError
 
     original_value = get_storage_original(
         evm.env.state, evm.message.current_target, key
     )
-
-    # Gas Cost Calculation
-    gas_cost = GAS_SLOAD
+    current_value = get_storage(evm.env.state, evm.message.current_target, key)
 
     if original_value == current_value and current_value != new_value:
         if original_value == 0:
             gas_cost = GAS_STORAGE_SET
         else:
             gas_cost = GAS_STORAGE_UPDATE
+    else:
+        gas_cost = GAS_SLOAD
 
     # Refund Counter Calculation
     if current_value != new_value:
@@ -109,8 +102,10 @@ def sstore(evm: Evm) -> None:
                 # Slot was originally non-empty and was UPDATED earlier
                 evm.refund_counter += int(GAS_STORAGE_UPDATE - GAS_SLOAD)
 
-    evm.gas_left = subtract_gas(evm.gas_left, gas_cost)
-
+    charge_gas(evm, gas_cost)
+    if evm.message.is_static:
+        raise WriteInStaticContext
     set_storage(evm.env.state, evm.message.current_target, key, new_value)
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)

@@ -11,9 +11,9 @@ Introduction
 
 Numeric operations specific utility functions used in this specification.
 """
-from typing import Sequence, Tuple
+from typing import Sequence, SupportsInt, Tuple
 
-from ethereum.base_types import Uint, Uint32
+from ethereum_types.numeric import U32, Uint
 
 
 def get_sign(value: int) -> int:
@@ -63,7 +63,7 @@ def ceil32(value: Uint) -> Uint:
         return value + ceiling - remainder
 
 
-def is_prime(number: int) -> bool:
+def is_prime(number: SupportsInt) -> bool:
     """
     Checks if `number` is a prime number.
 
@@ -77,6 +77,7 @@ def is_prime(number: int) -> bool:
     is_number_prime : `bool`
         Boolean indicating if `number` is prime or not.
     """
+    number = int(number)
     if number <= 1:
         return False
 
@@ -89,55 +90,55 @@ def is_prime(number: int) -> bool:
     return True
 
 
-def le_bytes_to_uint32_sequence(data: bytes) -> Tuple[Uint32, ...]:
+def le_bytes_to_uint32_sequence(data: bytes) -> Tuple[U32, ...]:
     """
-    Convert little endian byte stream `data` to a little endian Uint32
-    sequence i.e., the first Uint32 number of the sequence is the least
-    significant Uint32 number.
+    Convert little endian byte stream `data` to a little endian U32
+    sequence i.e., the first U32 number of the sequence is the least
+    significant U32 number.
 
     Parameters
     ----------
     data :
-        The byte stream (little endian) which is to be converted to a Uint32
+        The byte stream (little endian) which is to be converted to a U32
         stream.
 
     Returns
     -------
-    uint32_sequence : `Tuple[Uint32, ...]`
-        Sequence of Uint32 numbers obtained from the little endian byte
+    uint32_sequence : `Tuple[U32, ...]`
+        Sequence of U32 numbers obtained from the little endian byte
         stream.
     """
     sequence = []
     for i in range(0, len(data), 4):
-        sequence.append(Uint32.from_le_bytes(data[i : i + 4]))
+        sequence.append(U32.from_le_bytes(data[i : i + 4]))
 
     return tuple(sequence)
 
 
-def le_uint32_sequence_to_bytes(sequence: Sequence[Uint32]) -> bytes:
+def le_uint32_sequence_to_bytes(sequence: Sequence[U32]) -> bytes:
     r"""
-    Obtain little endian byte stream from a little endian Uint32 sequence
-    i.e., the first Uint32 number of the sequence is the least significant
-    Uint32 number.
+    Obtain little endian byte stream from a little endian U32 sequence
+    i.e., the first U32 number of the sequence is the least significant
+    U32 number.
 
     Note - In this conversion, the most significant byte (byte at the end of
     the little endian stream) may have leading zeroes. This function doesn't
     take care of removing these leading zeroes as shown in below example.
 
-    >>> le_uint32_sequence_to_bytes([Uint32(8)])
+    >>> le_uint32_sequence_to_bytes([U32(8)])
     b'\x08\x00\x00\x00'
 
 
     Parameters
     ----------
     sequence :
-        The Uint32 stream (little endian) which is to be converted to a
+        The U32 stream (little endian) which is to be converted to a
         little endian byte stream.
 
     Returns
     -------
     result : `bytes`
-        The byte stream obtained from the little endian Uint32 stream.
+        The byte stream obtained from the little endian U32 stream.
     """
     result_bytes = b""
     for item in sequence:
@@ -146,22 +147,56 @@ def le_uint32_sequence_to_bytes(sequence: Sequence[Uint32]) -> bytes:
     return result_bytes
 
 
-def le_uint32_sequence_to_uint(sequence: Sequence[Uint32]) -> Uint:
+def le_uint32_sequence_to_uint(sequence: Sequence[U32]) -> Uint:
     """
-    Obtain Uint from a Uint32 sequence assuming that this sequence is little
-    endian i.e., the first Uint32 number of the sequence is the least
-    significant Uint32 number.
+    Obtain Uint from a U32 sequence assuming that this sequence is little
+    endian i.e., the first U32 number of the sequence is the least
+    significant U32 number.
 
     Parameters
     ----------
     sequence :
-        The Uint32 stream (little endian) which is to be converted to a Uint.
+        The U32 stream (little endian) which is to be converted to a Uint.
 
     Returns
     -------
     value : `Uint`
         The Uint number obtained from the conversion of the little endian
-        Uint32 stream.
+        U32 stream.
     """
     sequence_as_bytes = le_uint32_sequence_to_bytes(sequence)
     return Uint.from_le_bytes(sequence_as_bytes)
+
+
+def taylor_exponential(
+    factor: Uint, numerator: Uint, denominator: Uint
+) -> Uint:
+    """
+    Approximates factor * e ** (numerator / denominator) using
+    Taylor expansion.
+
+    Parameters
+    ----------
+    factor :
+        The factor.
+    numerator :
+        The numerator of the exponential.
+    denominator :
+        The denominator of the exponential.
+
+    Returns
+    -------
+    output : `ethereum.base_types.Uint`
+        The approximation of factor * e ** (numerator / denominator).
+
+    """
+    i = Uint(1)
+    output = Uint(0)
+    numerator_accumulated = factor * denominator
+    while numerator_accumulated > Uint(0):
+        output += numerator_accumulated
+        numerator_accumulated = (numerator_accumulated * numerator) // (
+            denominator * i
+        )
+        i += Uint(1)
+    return output // denominator

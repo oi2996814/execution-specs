@@ -52,7 +52,11 @@ class InvalidOpcode(ExceptionalHalt):
     Raised when an invalid opcode is encountered.
     """
 
-    pass
+    code: int
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class InvalidJumpDestError(ExceptionalHalt):
@@ -75,10 +79,9 @@ class StackDepthLimitError(ExceptionalHalt):
     pass
 
 
-class InsufficientFunds(ExceptionalHalt):
+class AddressCollision(ExceptionalHalt):
     """
-    Raised when an account has insufficient funds to transfer the
-    requested value.
+    Raised when the new contract address has a collision.
     """
 
     pass
