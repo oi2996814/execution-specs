@@ -1,18 +1,21 @@
 from functools import partial
 
 import pytest
+from ethereum_rlp import rlp
 
-from ethereum import rlp
-from ethereum.istanbul.eth_types import Transaction
-from ethereum.istanbul.spec import (
+from ethereum.istanbul.fork import (
     calculate_intrinsic_cost,
     validate_transaction,
 )
+from ethereum.istanbul.transactions import Transaction
 from ethereum.utils.hexadecimal import hex_to_uint
+from tests.helpers import TEST_FIXTURES
 
-from ..helpers.eth_types_helpers import load_test_transaction
+from ..helpers.fork_types_helpers import load_test_transaction
 
-test_dir = "tests/fixtures/TransactionTests"
+ETHEREUM_TESTS_PATH = TEST_FIXTURES["ethereum_tests"]["fixture_path"]
+
+test_dir = f"{ETHEREUM_TESTS_PATH}/TransactionTests"
 
 load_istanbul_transaction = partial(load_test_transaction, network="Istanbul")
 
@@ -30,7 +33,7 @@ def test_high_nonce(test_file_high_nonce: str) -> None:
 
     tx = rlp.decode_to(Transaction, test["tx_rlp"])
 
-    assert validate_transaction(tx) == False
+    assert not validate_transaction(tx)
 
 
 @pytest.mark.parametrize(
@@ -49,5 +52,5 @@ def test_nonce(test_file_nonce: str) -> None:
         test["test_result"]["intrinsicGas"]
     )
 
-    assert validate_transaction(tx) == True
+    assert validate_transaction(tx)
     assert calculate_intrinsic_cost(tx) == result_intrinsic_gas_cost

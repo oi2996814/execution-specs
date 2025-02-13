@@ -12,20 +12,19 @@ Introduction
 Implementations of the EVM keccak instructions.
 """
 
-from ethereum.base_types import U256, Uint
+from ethereum_types.numeric import U256, Uint
+
 from ethereum.crypto.hash import keccak256
 from ethereum.utils.numeric import ceil32
-from ethereum.utils.safe_arithmetic import u256_safe_add, u256_safe_multiply
 
 from .. import Evm
-from ..exceptions import OutOfGasError
 from ..gas import (
     GAS_KECCAK256,
     GAS_KECCAK256_WORD,
     calculate_gas_extend_memory,
-    subtract_gas,
+    charge_gas,
 )
-from ..memory import extend_memory, memory_read_bytes
+from ..memory import memory_read_bytes
 from ..stack import pop, push
 
 
@@ -41,38 +40,25 @@ def keccak(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.frontier.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `2`.
     """
-    # Converting memory_start_index to Uint as memory_end_index can
-    # overflow U256.
-    memory_start_index = Uint(pop(evm.stack))
+    # STACK
+    memory_start_index = pop(evm.stack)
     size = pop(evm.stack)
 
-    words = ceil32(Uint(size)) // 32
-    word_gas_cost = u256_safe_multiply(
-        GAS_KECCAK256_WORD,
-        words,
-        exception_type=OutOfGasError,
+    # GAS
+    words = ceil32(Uint(size)) // Uint(32)
+    word_gas_cost = GAS_KECCAK256_WORD * words
+    extend_memory = calculate_gas_extend_memory(
+        evm.memory, [(memory_start_index, size)]
     )
-    memory_extend_gas_cost = calculate_gas_extend_memory(
-        evm.memory, memory_start_index, size
-    )
-    total_gas_cost = u256_safe_add(
-        GAS_KECCAK256,
-        word_gas_cost,
-        memory_extend_gas_cost,
-        exception_type=OutOfGasError,
-    )
-    evm.gas_left = subtract_gas(evm.gas_left, total_gas_cost)
+    charge_gas(evm, GAS_KECCAK256 + word_gas_cost + extend_memory.cost)
 
-    extend_memory(evm.memory, memory_start_index, size)
-
+    # OPERATION
+    evm.memory += b"\x00" * extend_memory.expand_by
     data = memory_read_bytes(evm.memory, memory_start_index, size)
     hash = keccak256(data)
 
     push(evm.stack, U256.from_be_bytes(hash))
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)

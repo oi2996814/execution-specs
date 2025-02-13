@@ -10,7 +10,7 @@ Introduction
 ------------
 
 The state trie is the structure responsible for storing
-`eth1spec.eth_types.Account` objects.
+`.fork_types.Account` objects.
 """
 
 import copy
@@ -24,26 +24,25 @@ from typing import (
     MutableMapping,
     Optional,
     Sequence,
+    Tuple,
     TypeVar,
     Union,
     cast,
 )
 
+from ethereum_rlp import rlp
+from ethereum_types.bytes import Bytes
+from ethereum_types.frozen import slotted_freezable
+from ethereum_types.numeric import U256, Uint
+from typing_extensions import assert_type
+
 from ethereum.crypto.hash import keccak256
 from ethereum.tangerine_whistle import trie as previous_trie
-from ethereum.utils.ensure import ensure
 from ethereum.utils.hexadecimal import hex_to_bytes
 
-from .. import rlp
-from ..base_types import U256, Bytes, Uint, slotted_freezable
-from .eth_types import (
-    Account,
-    Address,
-    Receipt,
-    Root,
-    Transaction,
-    encode_account,
-)
+from .blocks import Receipt
+from .fork_types import Account, Address, Root, encode_account
+from .transactions import Transaction
 
 # note: an empty trie (regardless of whether it is secured) has root:
 #
@@ -84,7 +83,7 @@ class LeafNode:
     """Leaf node in the Merkle Trie"""
 
     rest_of_key: Bytes
-    value: rlp.RLP
+    value: rlp.Extended
 
 
 @slotted_freezable
@@ -93,7 +92,27 @@ class ExtensionNode:
     """Extension node in the Merkle Trie"""
 
     key_segment: Bytes
-    subnode: rlp.RLP
+    subnode: rlp.Extended
+
+
+BranchSubnodes = Tuple[
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+    rlp.Extended,
+]
 
 
 @slotted_freezable
@@ -101,14 +120,14 @@ class ExtensionNode:
 class BranchNode:
     """Branch node in the Merkle Trie"""
 
-    subnodes: List[rlp.RLP]
-    value: rlp.RLP
+    subnodes: BranchSubnodes
+    value: rlp.Extended
 
 
 InternalNode = Union[LeafNode, ExtensionNode, BranchNode]
 
 
-def encode_internal_node(node: Optional[InternalNode]) -> rlp.RLP:
+def encode_internal_node(node: Optional[InternalNode]) -> rlp.Extended:
     """
     Encodes a Merkle Trie node into its RLP form. The RLP will then be
     serialized into a `Bytes` and hashed unless it is less that 32 bytes
@@ -124,10 +143,10 @@ def encode_internal_node(node: Optional[InternalNode]) -> rlp.RLP:
 
     Returns
     -------
-    encoded : `rlp.RLP`
+    encoded : `rlp.Extended`
         The node encoded as RLP.
     """
-    unencoded: rlp.RLP
+    unencoded: rlp.Extended
     if node is None:
         unencoded = b""
     elif isinstance(node, LeafNode):
@@ -141,7 +160,7 @@ def encode_internal_node(node: Optional[InternalNode]) -> rlp.RLP:
             node.subnode,
         )
     elif isinstance(node, BranchNode):
-        unencoded = node.subnodes + [node.value]
+        unencoded = list(node.subnodes) + [node.value]
     else:
         raise AssertionError(f"Invalid internal node type {type(node)}!")
 
@@ -162,7 +181,7 @@ def encode_node(node: Node, storage_root: Optional[Bytes] = None) -> Bytes:
         assert storage_root is not None
         return encode_account(node, storage_root)
     elif isinstance(node, (Transaction, Receipt, U256)):
-        return rlp.encode(cast(rlp.RLP, node))
+        return rlp.encode(node)
     elif isinstance(node, Bytes):
         return node
     else:
@@ -323,7 +342,7 @@ def bytes_to_nibble_list(bytes_: Bytes) -> Bytes:
 
 def _prepare_trie(
     trie: Trie[K, V],
-    get_storage_root: Callable[[Address], Root] = None,
+    get_storage_root: Optional[Callable[[Address], Root]] = None,
 ) -> Mapping[Bytes, Bytes]:
     """
     Prepares the trie for root calculation. Removes values that are empty,
@@ -339,20 +358,20 @@ def _prepare_trie(
 
     Returns
     -------
-    out : `Mapping[eth1spec.base_types.Bytes, Node]`
+    out : `Mapping[ethereum.base_types.Bytes, Node]`
         Object with keys mapped to nibble-byte form.
     """
     mapped: MutableMapping[Bytes, Bytes] = {}
 
-    for (preimage, value) in trie._data.items():
+    for preimage, value in trie._data.items():
         if isinstance(value, Account):
             assert get_storage_root is not None
             address = Address(preimage)
             encoded_value = encode_node(value, get_storage_root(address))
         else:
             encoded_value = encode_node(value)
-        # Empty values are represented by their absence
-        ensure(encoded_value != b"", AssertionError)
+        if encoded_value == b"":
+            raise AssertionError
         key: Bytes
         if trie.secured:
             # "secure" tries hash keys once before construction
@@ -366,7 +385,7 @@ def _prepare_trie(
 
 def root(
     trie: Trie[K, V],
-    get_storage_root: Callable[[Address], Root] = None,
+    get_storage_root: Optional[Callable[[Address], Root]] = None,
 ) -> Root:
     """
     Computes the root of a modified merkle patricia trie (MPT).
@@ -382,7 +401,7 @@ def root(
 
     Returns
     -------
-    root : `eth1spec.eth_types.Root`
+    root : `.fork_types.Root`
         MPT root of the underlying key-value pairs.
     """
     obj = _prepare_trie(trie, get_storage_root)
@@ -413,7 +432,7 @@ def patricialize(
 
     Returns
     -------
-    node : `eth1spec.base_types.Bytes`
+    node : `ethereum.base_types.Bytes`
         Root node of `obj`.
     """
     if len(obj) == 0:
@@ -441,10 +460,12 @@ def patricialize(
 
     # if extension node
     if prefix_length > 0:
-        prefix = arbitrary_key[level : level + prefix_length]
+        prefix = arbitrary_key[int(level) : int(level) + prefix_length]
         return ExtensionNode(
             prefix,
-            encode_internal_node(patricialize(obj, level + prefix_length)),
+            encode_internal_node(
+                patricialize(obj, level + Uint(prefix_length))
+            ),
         )
 
     branches: List[MutableMapping[Bytes, Bytes]] = []
@@ -460,10 +481,11 @@ def patricialize(
         else:
             branches[key[level]][key] = obj[key]
 
+    subnodes = tuple(
+        encode_internal_node(patricialize(branches[k], level + Uint(1)))
+        for k in range(16)
+    )
     return BranchNode(
-        [
-            encode_internal_node(patricialize(branches[k], level + 1))
-            for k in range(16)
-        ],
+        cast(BranchSubnodes, assert_type(subnodes, Tuple[rlp.Extended, ...])),
         value,
     )

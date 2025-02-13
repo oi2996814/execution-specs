@@ -17,12 +17,13 @@ There is a distinction between an account that does not exist and
 `EMPTY_ACCOUNT`.
 """
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from ethereum.base_types import U256, Bytes, Uint, modify
-from ethereum.utils.ensure import ensure
+from ethereum_types.bytes import Bytes, Bytes32
+from ethereum_types.frozen import modify
+from ethereum_types.numeric import U256, Uint
 
-from .eth_types import EMPTY_ACCOUNT, Account, Address, Root
+from .fork_types import EMPTY_ACCOUNT, Account, Address, Root
 from .trie import EMPTY_TRIE_ROOT, Trie, copy_trie, root, trie_get, trie_set
 
 
@@ -35,14 +36,16 @@ class State:
     _main_trie: Trie[Address, Optional[Account]] = field(
         default_factory=lambda: Trie(secured=True, default=None)
     )
-    _storage_tries: Dict[Address, Trie[Bytes, U256]] = field(
+    _storage_tries: Dict[Address, Trie[Bytes32, U256]] = field(
         default_factory=dict
     )
     _snapshots: List[
         Tuple[
-            Trie[Address, Optional[Account]], Dict[Address, Trie[Bytes, U256]]
+            Trie[Address, Optional[Account]],
+            Dict[Address, Trie[Bytes32, U256]],
         ]
     ] = field(default_factory=list)
+    created_accounts: Set[Address] = field(default_factory=set)
 
 
 def close_state(state: State) -> None:
@@ -53,6 +56,7 @@ def close_state(state: State) -> None:
     del state._main_trie
     del state._storage_tries
     del state._snapshots
+    del state.created_accounts
 
 
 def begin_transaction(state: State) -> None:
@@ -85,6 +89,8 @@ def commit_transaction(state: State) -> None:
         The state.
     """
     state._snapshots.pop()
+    if not state._snapshots:
+        state.created_accounts.clear()
 
 
 def rollback_transaction(state: State) -> None:
@@ -98,6 +104,8 @@ def rollback_transaction(state: State) -> None:
         The state.
     """
     state._main_trie, state._storage_tries = state._snapshots.pop()
+    if not state._snapshots:
+        state.created_accounts.clear()
 
 
 def get_account(state: State, address: Address) -> Account:
@@ -201,7 +209,27 @@ def destroy_storage(state: State, address: Address) -> None:
         del state._storage_tries[address]
 
 
-def get_storage(state: State, address: Address, key: Bytes) -> U256:
+def mark_account_created(state: State, address: Address) -> None:
+    """
+    Mark an account as having been created in the current transaction.
+    This information is used by `get_storage_original()` to handle an obscure
+    edgecase.
+
+    The marker is not removed even if the account creation reverts. Since the
+    account cannot have had code prior to its creation and can't call
+    `get_storage_original()`, this is harmless.
+
+    Parameters
+    ----------
+    state: `State`
+        The state
+    address : `Address`
+        Address of the account that has been created.
+    """
+    state.created_accounts.add(address)
+
+
+def get_storage(state: State, address: Address, key: Bytes32) -> U256:
     """
     Get a value at a storage key on an account. Returns `U256(0)` if the
     storage key has not been set previously.
@@ -231,7 +259,7 @@ def get_storage(state: State, address: Address, key: Bytes) -> U256:
 
 
 def set_storage(
-    state: State, address: Address, key: Bytes, value: U256
+    state: State, address: Address, key: Bytes32, value: U256
 ) -> None:
     """
     Set a value at a storage key on an account. Setting to `U256(0)` deletes
@@ -275,7 +303,7 @@ def storage_root(state: State, address: Address) -> Root:
     root : `Root`
         Storage root of the account.
     """
-    assert state._snapshots == []
+    assert not state._snapshots
     if address in state._storage_tries:
         return root(state._storage_tries[address])
     else:
@@ -296,7 +324,7 @@ def state_root(state: State) -> Root:
     root : `Root`
         The state root.
     """
-    assert state._snapshots == []
+    assert not state._snapshots
 
     def get_storage_root(address: Address) -> Root:
         return storage_root(state, address)
@@ -337,11 +365,30 @@ def account_has_code_or_nonce(state: State, address: Address) -> bool:
     Returns
     -------
     has_code_or_nonce : `bool`
-        True if if an account has non zero nonce or non empty code,
+        True if the account has non zero nonce or non empty code,
         False otherwise.
     """
     account = get_account(state, address)
     return account.nonce != Uint(0) or account.code != b""
+
+
+def account_has_storage(state: State, address: Address) -> bool:
+    """
+    Checks if an account has storage.
+
+    Parameters
+    ----------
+    state:
+        The state
+    address:
+        Address of the account that needs to be checked.
+
+    Returns
+    -------
+    has_storage : `bool`
+        True if the account has storage, False otherwise.
+    """
+    return address in state._storage_tries
 
 
 def is_account_empty(state: State, address: Address) -> bool:
@@ -369,6 +416,60 @@ def is_account_empty(state: State, address: Address) -> bool:
     )
 
 
+def account_exists_and_is_empty(state: State, address: Address) -> bool:
+    """
+    Checks if an account exists and has zero nonce, empty code and zero
+    balance.
+
+    Parameters
+    ----------
+    state:
+        The state
+    address:
+        Address of the account that needs to be checked.
+
+    Returns
+    -------
+    exists_and_is_empty : `bool`
+        True if an account exists and has zero nonce, empty code and zero
+        balance, False otherwise.
+    """
+    account = get_account_optional(state, address)
+    return (
+        account is not None
+        and account.nonce == Uint(0)
+        and account.code == b""
+        and account.balance == 0
+    )
+
+
+def is_account_alive(state: State, address: Address) -> bool:
+    """
+    Check whether is an account is both in the state and non empty.
+
+    Parameters
+    ----------
+    state:
+        The state
+    address:
+        Address of the account that needs to be checked.
+
+    Returns
+    -------
+    is_alive : `bool`
+        True if the account is alive.
+    """
+    account = get_account_optional(state, address)
+    if account is None:
+        return False
+    else:
+        return not (
+            account.nonce == Uint(0)
+            and account.code == b""
+            and account.balance == 0
+        )
+
+
 def modify_state(
     state: State, address: Address, f: Callable[[Account], None]
 ) -> None:
@@ -389,7 +490,8 @@ def move_ether(
     """
 
     def reduce_sender_balance(sender: Account) -> None:
-        ensure(sender.balance >= amount, AssertionError)
+        if sender.balance < amount:
+            raise AssertionError
         sender.balance -= amount
 
     def increase_recipient_balance(recipient: Account) -> None:
@@ -451,7 +553,7 @@ def increment_nonce(state: State, address: Address) -> None:
     """
 
     def increase_nonce(sender: Account) -> None:
-        sender.nonce += 1
+        sender.nonce += Uint(1)
 
     modify_state(state, address, increase_nonce)
 
@@ -498,7 +600,7 @@ def create_ether(state: State, address: Address, amount: U256) -> None:
     modify_state(state, address, increase_balance)
 
 
-def get_storage_original(state: State, address: Address, key: Bytes) -> U256:
+def get_storage_original(state: State, address: Address, key: Bytes32) -> U256:
     """
     Get the original value in a storage slot i.e. the value before the current
     transaction began. This function reads the value from the snapshots taken
@@ -513,6 +615,11 @@ def get_storage_original(state: State, address: Address, key: Bytes) -> U256:
     key:
         Key of the storage slot.
     """
+    # In the transaction where an account is created, its preexisting storage
+    # is ignored.
+    if address in state.created_accounts:
+        return U256(0)
+
     _, original_trie = state._snapshots[0]
     original_account_trie = original_trie.get(address)
 

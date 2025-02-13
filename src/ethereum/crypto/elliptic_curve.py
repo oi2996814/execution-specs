@@ -6,12 +6,15 @@ Elliptic Curves
 from typing import Generic, Type, TypeVar
 
 import coincurve
+from ethereum_types.bytes import Bytes
+from ethereum_types.numeric import U256
 
-from ..base_types import U256, Bytes
 from .finite_field import Field
 from .hash import Hash32
 
-SECP256K1N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+SECP256K1N = U256(
+    0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+)
 
 F = TypeVar("F", bound=Field)
 T = TypeVar("T", bound="EllipticCurve")

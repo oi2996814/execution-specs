@@ -9,28 +9,30 @@ import argparse
 import json
 import logging
 import os
+import pkgutil
 import shutil
 import time
 from queue import Empty, Full, Queue
 from threading import Thread
-from typing import Any, Dict, List, Optional, TypeVar, Union
+from typing import Any, Dict, List, Optional, TypeVar, Union, cast
 from urllib import request
 
-from ethereum import rlp
-from ethereum.base_types import Bytes0, Bytes256, Uint64
+from ethereum_rlp import rlp
+from ethereum_types.bytes import Bytes0, Bytes256
+from ethereum_types.numeric import U64, U256, Uint
+
+from ethereum import genesis
 from ethereum.utils.hexadecimal import (
     hex_to_bytes,
     hex_to_bytes8,
     hex_to_bytes32,
+    hex_to_u64,
     hex_to_u256,
     hex_to_uint,
 )
 
 from .forks import Hardfork
 
-EMPTY_TRIE_ROOT_STR = (
-    "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
-)
 T = TypeVar("T")
 
 
@@ -44,7 +46,586 @@ class RpcError(Exception):
         self.code = code
 
 
-class Sync:
+class ForkTracking:
+    """
+    Enables subclasses to track the current fork.
+    """
+
+    forks: List[Hardfork]
+    block_number: Uint
+    active_fork_index: int
+
+    def __init__(
+        self, forks: List[Hardfork], block_number: Uint, block_timestamp: U256
+    ):
+        self.forks = forks
+        self.set_block(block_number, block_timestamp)
+
+    @property
+    def active_fork(self) -> Hardfork:
+        """
+        Currently executing hard fork.
+        """
+        return self.forks[self.active_fork_index]
+
+    @property
+    def next_fork(self) -> Optional[Hardfork]:
+        """
+        Hard fork that follows the currently executing hard fork.
+        """
+        try:
+            return self.forks[self.active_fork_index + 1]
+        except IndexError:
+            return None
+
+    def module(self, name: str) -> Any:
+        """
+        Return a module from the current hard fork.
+        """
+        return self.active_fork.module(name)
+
+    def set_block(self, block_number: Uint, block_timestamp: U256) -> None:
+        """Set the block number and switch to the correct fork."""
+        self.block_number = block_number
+        self.active_fork_index = 0
+        while self.next_fork is not None and self.next_fork.has_activated(
+            block_number, block_timestamp
+        ):
+            self.active_fork_index += 1
+
+    def advance_block(self, timestamp: U256) -> bool:
+        """Increment the block number, return `True` if the fork changed."""
+        self.block_number += Uint(1)
+        new_fork = False
+        while self.next_fork is not None and self.next_fork.has_activated(
+            self.block_number, timestamp
+        ):
+            self.active_fork_index += 1
+            new_fork = True
+        return new_fork
+
+
+class BlockDownloader(ForkTracking):
+    """Downloads blocks from the RPC provider."""
+
+    queue: Queue
+    log: logging.Logger
+    rpc_url: str
+    geth: bool
+
+    def __init__(
+        self,
+        forks: List[Hardfork],
+        log: logging.Logger,
+        rpc_url: str,
+        geth: bool,
+        first_block: Uint,
+        first_block_timestamp: U256,
+    ) -> None:
+        ForkTracking.__init__(self, forks, first_block, first_block_timestamp)
+
+        # `first_block_timestamp` is the timestamp for the persisted block,
+        #  but the downloader starts 256 blocks earlier. Since this might be
+        #  the previous fork we step 1 fork backwards. In the case that there
+        #  wasn't a fork in the previous 256 blocks, `advance_block()` will
+        #  restore the correct fork before any blocks are processed.
+        if self.active_fork_index > 0:
+            self.active_fork_index -= 1
+
+        self.queue = Queue(maxsize=512)
+        self.log = log
+        self.rpc_url = rpc_url
+        self.geth = geth
+
+        Thread(target=self.download, name="download", daemon=True).start()
+
+    def take_block(self) -> Optional[Any]:
+        """
+        Pop a block of the download queue.
+        """
+        # Use a loop+timeout so that KeyboardInterrupt is still raised.
+        while True:
+            try:
+                return self.queue.get(timeout=1)
+            except Empty:
+                pass
+
+    def download(self) -> None:
+        """
+        Fetch chunks of blocks from the RPC provider.
+        """
+        running = True
+
+        while running:
+            count = Uint(max(1, self.queue.maxsize // 2))
+            replies = self.fetch_blocks(self.block_number + Uint(1), count)
+
+            for reply in replies:
+                to_push: Optional[bytes]
+
+                if isinstance(reply, RpcError):
+                    if reply.code != -32000:
+                        raise reply
+
+                    logging.info("reached end of chain", exc_info=reply)
+                    running = False
+                    to_push = None
+                else:
+                    to_push = reply
+
+                # Use a loop+timeout so that KeyboardInterrupt is still raised.
+                while True:
+                    try:
+                        self.queue.put(to_push, timeout=1)
+                        break
+                    except Full:
+                        pass
+
+    def fetch_blocks(
+        self,
+        first: Uint,
+        count: Uint,
+    ) -> List[Union[Any, RpcError]]:
+        """
+        Fetch the block specified by the given number from the RPC provider.
+        """
+        if self.geth:
+            return self.fetch_blocks_debug(first, count)
+        else:
+            return self.fetch_blocks_eth(first, count)
+
+    def fetch_blocks_debug(
+        self,
+        first: Uint,
+        count: Uint,
+    ) -> List[Union[bytes, RpcError]]:
+        """
+        Fetch the block specified by the given number from the RPC provider as
+        an RLP encoded byte array.
+        """
+        if count == 0:
+            return []
+
+        calls = []
+
+        for number in range(first, first + count):
+            calls.append(
+                {
+                    "jsonrpc": "2.0",
+                    "id": hex(number),
+                    "method": "debug_getRawBlock",
+                    "params": [hex(number)],
+                }
+            )
+
+        data = json.dumps(calls).encode("utf-8")
+
+        self.log.debug("fetching blocks [%d, %d)...", first, first + count)
+
+        post = request.Request(
+            self.rpc_url,
+            data=data,
+            headers={
+                "Content-Length": str(len(data)),
+                "Content-Type": "application/json",
+                "User-Agent": "ethereum-spec-sync",
+            },
+        )
+
+        with request.urlopen(post) as response:
+            replies = json.load(response)
+            if not isinstance(replies, list):
+                self.log.error(
+                    "got non-list JSON-RPC response. replies=%r", replies
+                )
+                raise ValueError
+
+            block_rlps: Dict[Uint, Union[RpcError, bytes]] = {}
+
+            for reply in replies:
+                try:
+                    reply_id = Uint(int(reply["id"], 0))
+                except Exception:
+                    self.log.exception(
+                        "unable to parse RPC id. reply=%r", reply
+                    )
+                    raise
+
+                if reply_id < first or reply_id >= first + count:
+                    raise Exception("mismatched request id")
+
+                if "error" in reply:
+                    block_rlps[reply_id] = RpcError(
+                        reply["error"]["code"],
+                        reply["error"]["message"],
+                    )
+                else:
+                    block_rlps[reply_id] = bytes.fromhex(reply["result"][2:])
+
+            if len(block_rlps) != count:
+                raise Exception(
+                    f"expected {count} blocks but only got {len(block_rlps)}"
+                )
+
+            self.log.info("blocks [%d, %d) fetched", first, first + count)
+
+            blocks: List[Union[RpcError, Any]] = []
+            for _, block_rlp in sorted(block_rlps.items()):
+                if isinstance(block_rlp, RpcError):
+                    blocks.append(block_rlp)
+                else:
+                    # Unfortunately we have to decode the RLP twice.
+                    decoded_block = rlp.decode(block_rlp)
+                    assert not isinstance(decoded_block, bytes)
+                    assert not isinstance(decoded_block[0], bytes)
+                    assert isinstance(decoded_block[0][11], bytes)
+                    timestamp = U256.from_be_bytes(decoded_block[0][11])
+                    self.advance_block(timestamp)
+                    try:
+                        blocks.append(
+                            rlp.decode_to(
+                                self.module("blocks").Block, block_rlp
+                            )
+                        )
+                    except Exception:
+                        self.log.exception(
+                            "failed to decode block %d with timestamp %d",
+                            self.block_number,
+                            timestamp,
+                        )
+                        raise
+
+            return blocks
+
+    def load_transaction(self, t: Any) -> Any:
+        """
+        Turn a json transaction into a `Transaction`.
+        """
+        access_list = []
+        for sublist in t.get("accessList", []):
+            access_list.append(
+                (
+                    self.module("utils.hexadecimal").hex_to_address(
+                        sublist.get("address")
+                    ),
+                    [
+                        hex_to_bytes32(key)
+                        for key in sublist.get("storageKeys")
+                    ],
+                )
+            )
+        if hasattr(self.module("transactions"), "LegacyTransaction"):
+            if t["type"] == "0x1":
+                return b"\x01" + rlp.encode(
+                    self.module("transactions").AccessListTransaction(
+                        hex_to_u64(t["chainId"]),
+                        hex_to_u256(t["nonce"]),
+                        hex_to_u256(t["gasPrice"]),
+                        hex_to_u256(t["gas"]),
+                        self.module("utils.hexadecimal").hex_to_address(
+                            t["to"]
+                        )
+                        if t["to"]
+                        else Bytes0(b""),
+                        hex_to_u256(t["value"]),
+                        hex_to_bytes(t["input"]),
+                        access_list,
+                        hex_to_u256(t["v"]),
+                        hex_to_u256(t["r"]),
+                        hex_to_u256(t["s"]),
+                    )
+                )
+            elif t["type"] == "0x2":
+                return b"\x02" + rlp.encode(
+                    self.module("transactions").FeeMarketTransaction(
+                        hex_to_u64(t["chainId"]),
+                        hex_to_u256(t["nonce"]),
+                        hex_to_u256(t["maxPriorityFeePerGas"]),
+                        hex_to_u256(t["maxFeePerGas"]),
+                        hex_to_u256(t["gas"]),
+                        self.module("utils.hexadecimal").hex_to_address(
+                            t["to"]
+                        )
+                        if t["to"]
+                        else Bytes0(b""),
+                        hex_to_u256(t["value"]),
+                        hex_to_bytes(t["input"]),
+                        access_list,
+                        hex_to_u256(t["v"]),
+                        hex_to_u256(t["r"]),
+                        hex_to_u256(t["s"]),
+                    )
+                )
+            else:
+                return self.module("transactions").LegacyTransaction(
+                    hex_to_u256(t["nonce"]),
+                    hex_to_u256(t["gasPrice"]),
+                    hex_to_u256(t["gas"]),
+                    self.module("utils.hexadecimal").hex_to_address(t["to"])
+                    if t["to"]
+                    else Bytes0(b""),
+                    hex_to_u256(t["value"]),
+                    hex_to_bytes(t["input"]),
+                    hex_to_u256(t["v"]),
+                    hex_to_u256(t["r"]),
+                    hex_to_u256(t["s"]),
+                )
+        else:
+            return self.module("transactions").Transaction(
+                hex_to_u256(t["nonce"]),
+                hex_to_u256(t["gasPrice"]),
+                hex_to_u256(t["gas"]),
+                self.module("utils.hexadecimal").hex_to_address(t["to"])
+                if t["to"]
+                else Bytes0(b""),
+                hex_to_u256(t["value"]),
+                hex_to_bytes(t["input"]),
+                hex_to_u256(t["v"]),
+                hex_to_u256(t["r"]),
+                hex_to_u256(t["s"]),
+            )
+
+    def fetch_blocks_eth(
+        self,
+        first: Uint,
+        count: Uint,
+    ) -> List[Union[Any, RpcError]]:
+        """
+        Fetch the block specified by the given number from the RPC provider
+        using only standard endpoints.
+        """
+        if count == 0:
+            return []
+
+        calls = []
+
+        for number in range(first, first + count):
+            calls.append(
+                {
+                    "jsonrpc": "2.0",
+                    "id": hex(number),
+                    "method": "eth_getBlockByNumber",
+                    "params": [hex(number), True],
+                }
+            )
+
+        data = json.dumps(calls).encode("utf-8")
+
+        self.log.debug("fetching blocks [%d, %d)...", first, first + count)
+
+        post = request.Request(
+            self.rpc_url,
+            data=data,
+            headers={
+                "Content-Length": str(len(data)),
+                "Content-Type": "application/json",
+                "User-Agent": "ethereum-spec-sync",
+            },
+        )
+
+        with request.urlopen(post) as response:
+            replies = json.load(response)
+            block_jsons: Dict[Uint, Any] = {}
+            ommers_needed: Dict[Uint, int] = {}
+            blocks: Dict[Uint, Union[Any, RpcError]] = {}
+
+            for reply in replies:
+                reply_id = Uint(int(reply["id"], 0))
+
+                if reply_id < first or reply_id >= first + count:
+                    raise Exception("mismatched request id")
+
+                if "error" in reply:
+                    blocks[reply_id] = RpcError(
+                        reply["error"]["code"],
+                        reply["error"]["message"],
+                    )
+                else:
+                    res = reply["result"]
+                    if res is None:
+                        from time import sleep
+
+                        sleep(12)
+                        break
+
+                    block_jsons[reply_id] = res
+                    ommers_needed[reply_id] = len(res["uncles"])
+
+            ommers = self.fetch_ommers(ommers_needed)
+            for id in block_jsons:
+                self.advance_block(hex_to_u256(block_jsons[id]["timestamp"]))
+                blocks[id] = self.make_block(
+                    block_jsons[id], ommers.get(id, ())
+                )
+
+            self.log.info("blocks [%d, %d) fetched", first, first + count)
+
+            return [v for (_, v) in sorted(blocks.items())]
+
+    def fetch_ommers(self, ommers_needed: Dict[Uint, int]) -> Dict[Uint, Any]:
+        """
+        Fetch the ommers for a given block from the RPC provider.
+        """
+        calls = []
+
+        for block_number, num_ommers in ommers_needed.items():
+            for i in range(num_ommers):
+                calls.append(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": hex(block_number * Uint(20) + Uint(i)),
+                        "method": "eth_getUncleByBlockNumberAndIndex",
+                        "params": [hex(block_number), hex(i)],
+                    }
+                )
+
+        if calls == []:
+            return {}
+
+        data = json.dumps(calls).encode("utf-8")
+
+        self.log.debug(
+            "fetching ommers [%d, %d]...",
+            min(ommers_needed),
+            max(ommers_needed),
+        )
+
+        post = request.Request(
+            self.rpc_url,
+            data=data,
+            headers={
+                "Content-Length": str(len(data)),
+                "Content-Type": "application/json",
+                "User-Agent": "ethereum-spec-sync",
+            },
+        )
+
+        with request.urlopen(post) as response:
+            replies = json.load(response)
+            ommers: Dict[Uint, Dict[Uint, Any]] = {}
+
+            twenty = Uint(20)
+            for reply in replies:
+                reply_id = Uint(int(reply["id"], 0))
+
+                if reply_id // twenty not in ommers:
+                    ommers[reply_id // twenty] = {}
+
+                if "error" in reply:
+                    raise RpcError(
+                        reply["error"]["code"],
+                        reply["error"]["message"],
+                    )
+                else:
+                    ommers[reply_id // twenty][
+                        reply_id % twenty
+                    ] = self.make_header(reply["result"])
+
+            self.log.info(
+                "ommers [%d, %d] fetched",
+                min(ommers_needed),
+                max(ommers_needed),
+            )
+
+            return {
+                k: tuple(x for (_, x) in sorted(v.items()))
+                for (k, v) in ommers.items()
+            }
+
+    def make_header(self, json: Any) -> Any:
+        """
+        Create a Header object from JSON describing it.
+        """
+        fields = [
+            hex_to_bytes32(json["parentHash"]),
+            hex_to_bytes32(json["sha3Uncles"]),
+            self.module("utils.hexadecimal").hex_to_address(json["miner"]),
+            hex_to_bytes32(json["stateRoot"]),
+            hex_to_bytes32(json["transactionsRoot"]),
+            hex_to_bytes32(json["receiptsRoot"]),
+            Bytes256(hex_to_bytes(json["logsBloom"])),
+            hex_to_uint(json["difficulty"]),
+            hex_to_uint(json["number"]),
+            hex_to_uint(json["gasLimit"]),
+            hex_to_uint(json["gasUsed"]),
+            hex_to_u256(json["timestamp"]),
+            hex_to_bytes(json["extraData"]),
+            hex_to_bytes32(json["mixHash"]),
+            hex_to_bytes8(json["nonce"]),
+        ]
+        if hasattr(self.module("blocks").Header, "base_fee_per_gas"):
+            fields.append(hex_to_uint(json["baseFeePerGas"]))
+        if hasattr(self.module("blocks").Header, "withdrawals_root"):
+            fields.append(hex_to_bytes32(json["withdrawalsRoot"]))
+        return self.module("blocks").Header(*fields)
+
+    def make_block(self, json: Any, ommers: Any) -> Any:
+        """
+        Create a block from JSON describing it.
+        """
+        header = self.make_header(json)
+        transactions = []
+        for t in json["transactions"]:
+            transactions.append(self.load_transaction(t))
+
+        if json.get("withdrawals") is not None:
+            withdrawals = []
+            for j in json["withdrawals"]:
+                withdrawals.append(
+                    self.module("blocks").Withdrawal(
+                        hex_to_u64(j["index"]),
+                        hex_to_u64(j["validatorIndex"]),
+                        self.module("utils.hexadecimal").hex_to_address(
+                            j["address"]
+                        ),
+                        hex_to_u256(j["amount"]),
+                    )
+                )
+
+        extra_fields = []
+        if hasattr(self.module("blocks").Block, "withdrawals"):
+            extra_fields.append(withdrawals)
+
+        return self.module("blocks").Block(
+            header,
+            tuple(transactions),
+            ommers,
+            *extra_fields,
+        )
+
+    def download_chain_id(self) -> U64:
+        """
+        Fetch the chain id of the executing chain from the rpc provider.
+        """
+        call = [
+            {
+                "jsonrpc": "2.0",
+                "id": hex(2),
+                "method": "eth_chainId",
+                "params": [],
+            }
+        ]
+        data = json.dumps(call).encode("utf-8")
+
+        post = request.Request(
+            self.rpc_url,
+            data=data,
+            headers={
+                "Content-Length": str(len(data)),
+                "Content-Type": "application/json",
+                "User-Agent": "ethereum-spec-sync",
+            },
+        )
+
+        with request.urlopen(post) as response:
+            reply = json.load(response)[0]
+            assert reply["id"] == hex(2)
+            chain_id = U64(int(reply["result"], 16))
+
+        return chain_id
+
+
+class Sync(ForkTracking):
     """
     A command line tool to fetch blocks from an RPC provider and validate them
     against the specification.
@@ -99,42 +680,44 @@ class Sync:
         )
 
         parser.add_argument(
-            "--stop-at", help="after syncing this block, exit successfully"
+            "--stop-at",
+            help="after syncing this block, exit successfully",
+            type=int,
+        )
+
+        parser.add_argument(
+            "--mainnet",
+            help="Set the chain to mainnet",
+            action="store_const",
+            dest="chain",
+            const="mainnet",
+            default="mainnet",
+        )
+        parser.add_argument(
+            "--zhejiang",
+            help="Set the chain to mainnet",
+            action="store_const",
+            dest="chain",
+            const="zhejiang",
+        )
+        parser.add_argument(
+            "--sepolia",
+            help="Set the chain to mainnet",
+            action="store_const",
+            dest="chain",
+            const="sepolia",
         )
 
         return parser.parse_args()
 
-    downloaded_blocks: Queue
-    forks: List[Hardfork]
-    active_fork_index: int
+    downloader: BlockDownloader
     options: argparse.Namespace
     chain: Any
     log: logging.Logger
 
-    @property
-    def active_fork(self) -> Hardfork:
-        """
-        Currently executing hard fork.
-        """
-        return self.forks[self.active_fork_index]
-
-    @property
-    def next_fork(self) -> Optional[Hardfork]:
-        """
-        Hard fork that follows the currently executing hard fork.
-        """
-        try:
-            return self.forks[self.active_fork_index + 1]
-        except IndexError:
-            return None
-
     def __init__(self) -> None:
-        self.downloaded_blocks = Queue(maxsize=512)
         self.log = logging.getLogger(__name__)
         self.options = self.parse_arguments()
-
-        self.forks = Hardfork.discover()
-        self.active_fork_index = 0
 
         if not self.options.unoptimized:
             import ethereum_optimized
@@ -163,9 +746,23 @@ class Sync:
                 self.log.error("--reset is not supported without --persist")
                 exit(1)
 
+        config_str = cast(
+            bytes,
+            pkgutil.get_data("ethereum", f"assets/{self.options.chain}.json"),
+        ).decode()
+        config = json.loads(config_str)
+
+        if self.options.chain == "mainnet":
+            forks = Hardfork.discover()
+        else:
+            forks = Hardfork.load_from_json(config)
+
+        ForkTracking.__init__(self, forks, Uint(0), U256(0))
+
         if self.options.reset:
             import rust_pyspec_glue
 
+            assert self.options.persist is not None
             rust_pyspec_glue.DB.delete(self.options.persist)
 
         if self.options.initial_state is not None:
@@ -184,38 +781,86 @@ class Sync:
 
         state = self.module("state").State()
 
+        persisted_block: Optional[Uint] = None
+        persisted_block_timestamp: Optional[U256] = None
+
         if self.options.persist is not None:
-            persisted_block = self.active_fork.optimized_module(
-                "state_db"
-            ).get_metadata(state, b"block_number")
+            state_mod = self.module("state")
+            persisted_block_opt = state_mod.get_metadata(
+                state, b"block_number"
+            )
+            persisted_block_timestamp_opt = state_mod.get_metadata(
+                state, b"block_timestamp"
+            )
 
-            if persisted_block is not None:
-                persisted_block = int(persisted_block)
-        else:
-            persisted_block = None
+            if persisted_block_opt is not None:
+                persisted_block = Uint(int(persisted_block_opt))
+            if persisted_block_timestamp_opt is not None:
+                persisted_block_timestamp = U256(
+                    int(persisted_block_timestamp_opt)
+                )
 
-        if persisted_block is None:
-            self.chain = self.module("spec").BlockChain(
+        if persisted_block is None or persisted_block_timestamp is None:
+            self.chain = self.module("fork").BlockChain(
                 blocks=[],
                 state=state,
                 chain_id=None,
             )
-            self.set_initial_fork(0)
-            self.chain = self.module("spec").apply_fork(self.chain)
+            genesis_configuration = genesis.get_genesis_configuration(
+                f"{self.options.chain}.json"
+            )
+
+            description: genesis.GenesisFork = genesis.GenesisFork(
+                Address=self.active_fork.module("fork_types").Address,
+                Account=self.active_fork.module("fork_types").Account,
+                Trie=self.active_fork.module("trie").Trie,
+                Bloom=self.active_fork.module("fork_types").Bloom,
+                Header=self.active_fork.module("blocks").Header,
+                Block=self.active_fork.module("blocks").Block,
+                set_account=self.active_fork.module("state").set_account,
+                set_storage=self.active_fork.module("state").set_storage,
+                state_root=self.active_fork.module("state").state_root,
+                root=self.active_fork.module("trie").root,
+                hex_to_address=self.active_fork.module(
+                    "utils.hexadecimal"
+                ).hex_to_address,
+            )
+            genesis.add_genesis_block(
+                description,
+                self.chain,
+                genesis_configuration,
+            )
+            self.downloader = BlockDownloader(
+                forks,
+                self.log,
+                self.options.rpc_url,
+                self.options.geth,
+                Uint(0),
+                genesis_configuration.timestamp,
+            )
+            self.set_block(Uint(0), genesis_configuration.timestamp)
         else:
-            self.set_initial_fork(persisted_block)
-            self.chain = self.module("spec").BlockChain(
-                blocks=self.fetch_initial_blocks(persisted_block),
+            self.set_block(persisted_block, persisted_block_timestamp)
+            if persisted_block < Uint(256):
+                initial_blocks_length = persisted_block
+            else:
+                initial_blocks_length = Uint(255)
+            self.downloader = BlockDownloader(
+                forks,
+                self.log,
+                self.options.rpc_url,
+                self.options.geth,
+                persisted_block - initial_blocks_length,
+                persisted_block_timestamp,
+            )
+            blocks = []
+            for _ in range(initial_blocks_length):
+                blocks.append(self.downloader.take_block())
+            self.chain = self.module("fork").BlockChain(
+                blocks=blocks,
                 state=state,
                 chain_id=self.fetch_chain_id(state),
             )
-
-    def set_initial_fork(self, block_number: int) -> None:
-        """Set the initial fork, don't run any transitions."""
-        self.active_fork_index = 0
-        while self.next_fork and block_number >= self.next_fork.block:
-            self.active_fork_index += 1
-        self.log.info("initial fork is %s", self.active_fork.name)
 
     def persist(self) -> None:
         """
@@ -226,7 +871,8 @@ class Sync:
 
         self.log.debug("persisting blocks and state...")
 
-        self.active_fork.optimized_module("state_db").set_metadata(
+        state_mod = self.module("state")
+        state_mod.set_metadata(
             self.chain.state,
             b"chain_id",
             str(self.chain.chain_id).encode(),
@@ -234,9 +880,8 @@ class Sync:
 
         start = time.monotonic()
 
-        module = self.active_fork.optimized_module("state_db")
-        module.commit_db_transaction(self.chain.state)
-        module.begin_db_transaction(self.chain.state)
+        state_mod.commit_db_transaction(self.chain.state)
+        state_mod.begin_db_transaction(self.chain.state)
 
         end = time.monotonic()
         self.log.info(
@@ -245,451 +890,148 @@ class Sync:
             end - start,
         )
 
-    def module(self, name: str) -> Any:
-        """
-        Return a module from the current hard fork.
-        """
-        return self.active_fork.module(name)
-
-    def make_header(self, json: Any) -> Any:
-        """
-        Create a Header object from JSON describing it.
-        """
-        return self.module("eth_types").Header(
-            hex_to_bytes32(json["parentHash"]),
-            hex_to_bytes32(json["sha3Uncles"]),
-            self.module("utils.hexadecimal").hex_to_address(json["miner"]),
-            hex_to_bytes32(json["stateRoot"]),
-            hex_to_bytes32(json["transactionsRoot"]),
-            hex_to_bytes32(json["receiptsRoot"]),
-            Bytes256(hex_to_bytes(json["logsBloom"])),
-            hex_to_uint(json["difficulty"]),
-            hex_to_uint(json["number"]),
-            hex_to_uint(json["gasLimit"]),
-            hex_to_uint(json["gasUsed"]),
-            hex_to_u256(json["timestamp"]),
-            hex_to_bytes(json["extraData"]),
-            hex_to_bytes32(json["mixHash"]),
-            hex_to_bytes8(json["nonce"]),
-        )
-
-    def fetch_ommers(self, ommers_needed: Dict[int, int]) -> Dict[int, Any]:
-        """
-        Fetch the ommers for a given block from the RPC provider.
-        """
-        calls = []
-
-        for (block_number, num_ommers) in ommers_needed.items():
-            for i in range(num_ommers):
-                calls.append(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": hex(block_number * 20 + i),
-                        "method": "eth_getUncleByBlockNumberAndIndex",
-                        "params": [hex(block_number), hex(i)],
-                    }
-                )
-
-        if calls == []:
-            return {}
-
-        data = json.dumps(calls).encode("utf-8")
-
-        self.log.debug(
-            "fetching ommers [%d, %d]...",
-            min(ommers_needed),
-            max(ommers_needed),
-        )
-
-        post = request.Request(
-            self.options.rpc_url,
-            data=data,
-            headers={
-                "Content-Length": str(len(data)),
-                "Content-Type": "application/json",
-            },
-        )
-
-        with request.urlopen(post) as response:
-            replies = json.load(response)
-            ommers: Dict[int, Dict[int, Any]] = {}
-
-            for reply in replies:
-                reply_id = int(reply["id"], 0)
-
-                if reply_id // 20 not in ommers:
-                    ommers[reply_id // 20] = {}
-
-                if "error" in reply:
-                    raise RpcError(
-                        reply["error"]["code"],
-                        reply["error"]["message"],
-                    )
-                else:
-                    ommers[reply_id // 20][reply_id % 20] = self.make_header(
-                        reply["result"]
-                    )
-
-            self.log.info(
-                "ommers [%d, %d] fetched",
-                min(ommers_needed),
-                max(ommers_needed),
-            )
-
-            return {
-                k: tuple(x for (_, x) in sorted(v.items()))
-                for (k, v) in ommers.items()
-            }
-
-    def fetch_chain_id(self, state: Any) -> Uint64:
+    def fetch_chain_id(self, state: Any) -> U64:
         """
         Fetch the persisted chain id from the database.
         """
-        chain_id = self.active_fork.optimized_module("state_db").get_metadata(
-            state, b"chain_id"
-        )
+        state_mod = self.module("state")
+        chain_id = state_mod.get_metadata(state, b"chain_id")
 
         if chain_id is not None:
-            chain_id = Uint64(int(chain_id))
+            chain_id = U64(int(chain_id))
 
         return chain_id
-
-    def fetch_initial_blocks(self, block_number: int) -> List[Any]:
-        """
-        Fetch the blocks required to continue execution from `block_number`.
-        """
-        return self.fetch_blocks(
-            max(0, block_number - 255), min(256, block_number + 1)
-        )
-
-    def fetch_blocks(
-        self,
-        first: int,
-        count: int,
-    ) -> List[Union[Any, RpcError]]:
-        """
-        Fetch the block specified by the given number from the RPC provider.
-        """
-        if self.options.geth:
-            return self.fetch_blocks_debug(first, count)
-        else:
-            return self.fetch_blocks_eth(first, count)
-
-    def fetch_blocks_debug(
-        self,
-        first: int,
-        count: int,
-    ) -> List[Union[bytes, RpcError]]:
-        """
-        Fetch the block specified by the given number from the RPC provider as
-        an RLP encoded byte array.
-        """
-        if count == 0:
-            return []
-
-        calls = []
-
-        for number in range(first, first + count):
-            calls.append(
-                {
-                    "jsonrpc": "2.0",
-                    "id": hex(number),
-                    "method": "debug_getBlockRlp",
-                    "params": [number],
-                }
-            )
-
-        data = json.dumps(calls).encode("utf-8")
-
-        self.log.debug("fetching blocks [%d, %d)...", first, first + count)
-
-        post = request.Request(
-            self.options.rpc_url,
-            data=data,
-            headers={
-                "Content-Length": str(len(data)),
-                "Content-Type": "application/json",
-            },
-        )
-
-        with request.urlopen(post) as response:
-            replies = json.load(response)
-            blocks: Dict[int, Union[RpcError, bytes]] = {}
-
-            for reply in replies:
-                reply_id = int(reply["id"], 0)
-
-                if reply_id < first or reply_id >= first + count:
-                    raise Exception("mismatched request id")
-
-                if "error" in reply:
-                    blocks[reply_id] = RpcError(
-                        reply["error"]["code"],
-                        reply["error"]["message"],
-                    )
-                else:
-                    blocks[reply_id] = bytes.fromhex(reply["result"])
-
-            if len(blocks) != count:
-                raise Exception(
-                    f"expected {count} blocks but only got {len(blocks)}"
-                )
-
-            self.log.info("blocks [%d, %d) fetched", first, first + count)
-
-            return [v for (_, v) in sorted(blocks.items())]
-
-    def fetch_blocks_eth(
-        self,
-        first: int,
-        count: int,
-    ) -> List[Union[Any, RpcError]]:
-        """
-        Fetch the block specified by the given number from the RPC provider
-        using only standard endpoints.
-        """
-        if count == 0:
-            return []
-
-        calls = []
-
-        for number in range(first, first + count):
-            calls.append(
-                {
-                    "jsonrpc": "2.0",
-                    "id": hex(number),
-                    "method": "eth_getBlockByNumber",
-                    "params": [hex(number), True],
-                }
-            )
-
-        data = json.dumps(calls).encode("utf-8")
-
-        self.log.debug("fetching blocks [%d, %d)...", first, first + count)
-
-        post = request.Request(
-            self.options.rpc_url,
-            data=data,
-            headers={
-                "Content-Length": str(len(data)),
-                "Content-Type": "application/json",
-            },
-        )
-
-        with request.urlopen(post) as response:
-            replies = json.load(response)
-            blocks: Dict[int, Union[RpcError, Any]] = {}
-            headers: Dict[int, Any] = {}
-            transaction_lists: Dict[int, List[Any]] = {}
-            ommers_needed: Dict[int, int] = {}
-
-            for reply in replies:
-                reply_id = int(reply["id"], 0)
-
-                if reply_id < first or reply_id >= first + count:
-                    raise Exception("mismatched request id")
-
-                if "error" in reply:
-                    blocks[reply_id] = RpcError(
-                        reply["error"]["code"],
-                        reply["error"]["message"],
-                    )
-                else:
-                    res = reply["result"]
-                    headers[reply_id] = self.make_header(res)
-                    transactions = []
-                    for t in res["transactions"]:
-                        transactions.append(
-                            self.module("eth_types").Transaction(
-                                hex_to_u256(t["nonce"]),
-                                hex_to_u256(t["gasPrice"]),
-                                hex_to_u256(t["gas"]),
-                                self.module(
-                                    "utils.hexadecimal"
-                                ).hex_to_address(t["to"])
-                                if t["to"]
-                                else Bytes0(b""),
-                                hex_to_u256(t["value"]),
-                                hex_to_bytes(t["input"]),
-                                hex_to_u256(t["v"]),
-                                hex_to_u256(t["r"]),
-                                hex_to_u256(t["s"]),
-                            )
-                        )
-                    transaction_lists[reply_id] = transactions
-                    ommers_needed[reply_id] = len(res["uncles"])
-
-            ommers = self.fetch_ommers(ommers_needed)
-            for id in headers:
-                blocks[id] = self.module("eth_types").Block(
-                    headers[id],
-                    tuple(transaction_lists[id]),
-                    ommers.get(id, ()),
-                )
-
-            if len(blocks) != count:
-                raise Exception(
-                    f"expected {count} blocks but only got {len(blocks)}"
-                )
-
-            self.log.info("blocks [%d, %d) fetched", first, first + count)
-
-            return [v for (_, v) in sorted(blocks.items())]
-
-    def download(self) -> None:
-        """
-        Fetch chunks of blocks from the RPC provider.
-        """
-        start = self.chain.blocks[-1].header.number + 1
-        running = True
-
-        while running:
-            count = max(1, self.downloaded_blocks.maxsize // 2)
-            replies = self.fetch_blocks(start, count)
-
-            for reply in replies:
-                to_push: Optional[bytes]
-
-                if isinstance(reply, RpcError):
-                    if reply.code != -32000:
-                        raise reply
-
-                    logging.info("reached end of chain", exc_info=reply)
-                    running = False
-                    to_push = None
-                else:
-                    to_push = reply
-                    start += 1
-
-                # Use a loop+timeout so that KeyboardInterrupt is still raised.
-                while True:
-                    try:
-                        self.downloaded_blocks.put(to_push, timeout=1)
-                        break
-                    except Full:
-                        pass
-
-    def download_chain_id(self) -> Uint64:
-        """
-        Fetch the chain id of the executing chain from the rpc provider.
-        """
-        call = [
-            {
-                "jsonrpc": "2.0",
-                "id": hex(2),
-                "method": "eth_chainId",
-                "params": [],
-            }
-        ]
-        data = json.dumps(call).encode("utf-8")
-
-        post = request.Request(
-            self.options.rpc_url,
-            data=data,
-            headers={
-                "Content-Length": str(len(data)),
-                "Content-Type": "application/json",
-            },
-        )
-
-        with request.urlopen(post) as response:
-            reply = json.load(response)[0]
-            assert reply["id"] == hex(2)
-            chain_id = Uint64(int(reply["result"], 16))
-
-        return chain_id
-
-    def take_block(self) -> Optional[Any]:
-        """
-        Pop a block of the download queue.
-        """
-        # Use a loop+timeout so that KeyboardInterrupt is still raised.
-        while True:
-            try:
-                return self.downloaded_blocks.get(timeout=1)
-            except Empty:
-                pass
 
     def process_blocks(self) -> None:
         """
         Validate blocks that have been fetched.
         """
+        time_of_last_commit = time.monotonic()
         gas_since_last_commit = 0
+        last_committed_block: Optional[int] = None
+        block: Optional[Any] = None
+
+        def persist() -> None:
+            nonlocal time_of_last_commit
+            nonlocal gas_since_last_commit
+            nonlocal last_committed_block
+
+            now = time.monotonic()
+            elapsed = now - time_of_last_commit
+            time_of_last_commit = now
+
+            if elapsed == 0:
+                elapsed = 1
+
+            m_gas = gas_since_last_commit / 1_000_000.0
+            m_gas_per_second = m_gas / elapsed
+            gas_since_last_commit = 0
+
+            if block is not None:
+                count = block.header.number
+                if last_committed_block is not None:
+                    count -= last_committed_block
+                last_committed_block = block.header.number
+
+                self.log.info(
+                    "imported chain segment "
+                    "count=%d mgas=%f mgasps=%f block=%d",
+                    count,
+                    m_gas,
+                    m_gas_per_second,
+                    block.header.number,
+                )
+
+            self.persist()
+
         while True:
-            block = self.take_block()
+            block = self.downloader.take_block()
 
             if block is None:
                 break
 
             try:
-                block_number = self.chain.blocks[-1].header.number + 1
-            except IndexError:
-                block_number = 0
-
-            if self.next_fork and block_number >= self.next_fork.block:
-                self.active_fork_index += 1
-                self.log.debug("applying %s fork...", self.active_fork.name)
-                start = time.monotonic()
-                self.chain = self.module("spec").apply_fork(self.chain)
-                end = time.monotonic()
-                self.log.info(
-                    "applied %s fork (took %.3f)",
-                    self.active_fork.name,
-                    end - start,
+                self.process_block(block)
+            except Exception:
+                self.log.exception(
+                    "failed to process block %d", block.header.number
                 )
-
-            if isinstance(block, bytes):
-                # Decode the block using the rules for the active fork.
-                block = rlp.decode_to(self.module("eth_types").Block, block)
-
-            if block.header.number != block_number:
-                raise Exception(
-                    f"expected block {block_number} "
-                    f"but got {block.header.number}"
-                )
-
-            self.log.debug("applying block %d...", block_number)
-
-            start = time.monotonic()
-            self.module("spec").state_transition(self.chain, block)
-            end = time.monotonic()
+                raise
 
             # Additional gas to account for block overhead
             gas_since_last_commit += 30000
-            gas_since_last_commit += block.header.gas_used
+            gas_since_last_commit += int(block.header.gas_used)
 
             if self.options.persist is not None:
-                self.active_fork.optimized_module("state_db").set_metadata(
+                state_mod = self.module("state")
+                state_mod.set_metadata(
                     self.chain.state,
                     b"block_number",
-                    str(block_number).encode(),
+                    str(self.block_number).encode(),
+                )
+                state_mod.set_metadata(
+                    self.chain.state,
+                    b"block_timestamp",
+                    str(block.header.timestamp).encode(),
                 )
 
-            self.log.info(
-                "block %d applied (took %.3fs)",
-                block_number,
-                end - start,
+            self.log.debug(
+                "block %d applied",
+                self.block_number,
             )
 
-            if block_number == self.options.stop_at:
-                self.persist()
+            if self.block_number == self.options.stop_at:
+                persist()
                 return
 
-            if block_number > 2220000 and block_number < 2463000:
+            if self.block_number > Uint(2220000) and self.block_number < Uint(
+                2463000
+            ):
                 # Excessive DB load due to the Shanghai DOS attacks, requires
                 # more regular DB commits
                 if gas_since_last_commit > self.options.gas_per_commit / 10:
-                    self.persist()
-                    gas_since_last_commit = 0
-            elif block_number > 2675000 and block_number < 2700598:
+                    persist()
+            elif self.block_number > Uint(
+                2675000
+            ) and self.block_number < Uint(2700598):
                 # Excessive DB load due to state clearing, requires more
                 # regular DB commits
                 if gas_since_last_commit > self.options.gas_per_commit / 10:
-                    self.persist()
-                    gas_since_last_commit = 0
+                    persist()
             elif gas_since_last_commit > self.options.gas_per_commit:
-                self.persist()
-                gas_since_last_commit = 0
+                persist()
+
+    def process_block(self, block: Any) -> None:
+        """
+        Process a single block.
+        """
+        if (
+            self.advance_block(block.header.timestamp)
+            or self.block_number == 1
+        ):
+            self.log.debug("applying %s fork...", self.active_fork.name)
+            start = time.monotonic()
+            self.chain = self.module("fork").apply_fork(self.chain)
+            end = time.monotonic()
+            self.log.info(
+                "applied %s fork (took %.3f)",
+                self.active_fork.name,
+                end - start,
+            )
+
+        assert (not self.chain.blocks) or (
+            self.block_number == self.chain.blocks[-1].header.number + Uint(1)
+        )
+
+        if block.header.number != self.block_number:
+            raise Exception(
+                f"expected block {self.block_number} "
+                f"but got {block.header.number}"
+            )
+
+        self.log.debug("applying block %d...", self.block_number)
+
+        self.module("fork").state_transition(self.chain, block)
 
 
 def main() -> None:
@@ -699,10 +1041,6 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
     sync = Sync()
-
-    download = Thread(target=sync.download, name="download", daemon=True)
-    download.start()
-
     sync.process_blocks()
 
 

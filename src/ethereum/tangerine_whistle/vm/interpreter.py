@@ -11,38 +11,52 @@ Introduction
 
 A straightforward interpreter that executes EVM code.
 """
+
 from dataclasses import dataclass
-from itertools import chain
-from typing import Set, Tuple, Union
+from typing import Optional, Set, Tuple
 
-from ethereum import evm_trace
-from ethereum.base_types import U256, Bytes0, Uint
+from ethereum_types.bytes import Bytes0
+from ethereum_types.numeric import U256, Uint, ulen
 
-from ..eth_types import Address, Log
+from ethereum.exceptions import EthereumException
+from ethereum.trace import (
+    EvmStop,
+    OpEnd,
+    OpException,
+    OpStart,
+    PrecompileEnd,
+    PrecompileStart,
+    TransactionEnd,
+    evm_trace,
+)
+
+from ..blocks import Log
+from ..fork_types import Address
 from ..state import (
     account_has_code_or_nonce,
+    account_has_storage,
     begin_transaction,
     commit_transaction,
-    get_account,
+    destroy_storage,
     move_ether,
     rollback_transaction,
     set_code,
     touch_account,
 )
 from ..vm import Message
-from ..vm.gas import GAS_CODE_DEPOSIT, REFUND_SELF_DESTRUCT, subtract_gas
+from ..vm.gas import GAS_CODE_DEPOSIT, charge_gas
 from ..vm.precompiled_contracts.mapping import PRE_COMPILED_CONTRACTS
 from . import Environment, Evm
 from .exceptions import (
+    AddressCollision,
     ExceptionalHalt,
-    InsufficientFunds,
     InvalidOpcode,
     StackDepthLimitError,
 )
 from .instructions import Ops, op_implementation
 from .runtime import get_valid_jump_destinations
 
-STACK_DEPTH_LIMIT = U256(1024)
+STACK_DEPTH_LIMIT = Uint(1024)
 
 
 @dataclass
@@ -56,14 +70,14 @@ class MessageCallOutput:
           2. `refund_counter`: gas to refund after execution.
           3. `logs`: list of `Log` generated during execution.
           4. `accounts_to_delete`: Contracts which have self-destructed.
-          5. `has_erred`: True if execution has caused an error.
+          5. `error`: The error from the execution if any.
     """
 
-    gas_left: U256
+    gas_left: Uint
     refund_counter: U256
-    logs: Union[Tuple[()], Tuple[Log, ...]]
+    logs: Tuple[Log, ...]
     accounts_to_delete: Set[Address]
-    has_erred: bool
+    error: Optional[EthereumException]
 
 
 def process_message_call(
@@ -89,26 +103,36 @@ def process_message_call(
     if message.target == Bytes0(b""):
         is_collision = account_has_code_or_nonce(
             env.state, message.current_target
-        )
+        ) or account_has_storage(env.state, message.current_target)
         if is_collision:
-            return MessageCallOutput(U256(0), U256(0), tuple(), set(), True)
+            return MessageCallOutput(
+                Uint(0), U256(0), tuple(), set(), AddressCollision()
+            )
         else:
             evm = process_create_message(message, env)
     else:
         evm = process_message(message, env)
 
-    accounts_to_delete = collect_accounts_to_delete(evm)
-    refund_counter = (
-        calculate_gas_refund(evm)
-        + len(accounts_to_delete) * REFUND_SELF_DESTRUCT
+    if evm.error:
+        logs: Tuple[Log, ...] = ()
+        accounts_to_delete = set()
+        refund_counter = U256(0)
+    else:
+        logs = evm.logs
+        accounts_to_delete = evm.accounts_to_delete
+        refund_counter = U256(evm.refund_counter)
+
+    tx_end = TransactionEnd(
+        int(message.gas) - int(evm.gas_left), evm.output, evm.error
     )
+    evm_trace(evm, tx_end)
 
     return MessageCallOutput(
         gas_left=evm.gas_left,
         refund_counter=refund_counter,
-        logs=evm.logs if not evm.has_erred else (),
+        logs=logs,
         accounts_to_delete=accounts_to_delete,
-        has_erred=evm.has_erred,
+        error=evm.error,
     )
 
 
@@ -131,16 +155,23 @@ def process_create_message(message: Message, env: Environment) -> Evm:
     # take snapshot of state before processing the message
     begin_transaction(env.state)
 
+    # If the address where the account is being created has storage, it is
+    # destroyed. This can only happen in the following highly unlikely
+    # circumstances:
+    # * The address created by two `CREATE` calls collide.
+    # * The first `CREATE` left empty code.
+    destroy_storage(env.state, message.current_target)
+
     evm = process_message(message, env)
-    if not evm.has_erred:
+    if not evm.error:
         contract_code = evm.output
-        contract_code_gas = len(contract_code) * GAS_CODE_DEPOSIT
+        contract_code_gas = Uint(len(contract_code)) * GAS_CODE_DEPOSIT
         try:
-            evm.gas_left = subtract_gas(evm.gas_left, contract_code_gas)
-        except ExceptionalHalt:
+            charge_gas(evm, contract_code_gas)
+        except ExceptionalHalt as error:
             rollback_transaction(env.state)
-            evm.gas_left = U256(0)
-            evm.has_erred = True
+            evm.gas_left = Uint(0)
+            evm.error = error
         else:
             set_code(env.state, message.current_target, contract_code)
             commit_transaction(env.state)
@@ -173,20 +204,13 @@ def process_message(message: Message, env: Environment) -> Evm:
 
     touch_account(env.state, message.current_target)
 
-    sender_balance = get_account(env.state, message.caller).balance
-
     if message.should_transfer_value and message.value != 0:
-        if sender_balance < message.value:
-            rollback_transaction(env.state)
-            raise InsufficientFunds(
-                f"Insufficient funds: {sender_balance} < {message.value}"
-            )
         move_ether(
             env.state, message.caller, message.current_target, message.value
         )
 
     evm = execute_code(message, env)
-    if evm.has_erred:
+    if evm.error:
         # revert state to the last saved checkpoint
         # since the message call resulted in an error
         rollback_transaction(env.state)
@@ -213,6 +237,7 @@ def execute_code(message: Message, env: Environment) -> Evm:
     """
     code = message.code
     valid_jump_destinations = get_valid_jump_destinations(code)
+
     evm = Evm(
         pc=Uint(0),
         stack=[],
@@ -222,82 +247,34 @@ def execute_code(message: Message, env: Environment) -> Evm:
         env=env,
         valid_jump_destinations=valid_jump_destinations,
         logs=(),
-        refund_counter=U256(0),
+        refund_counter=0,
         running=True,
         message=message,
         output=b"",
         accounts_to_delete=set(),
-        has_erred=False,
-        children=[],
+        error=None,
     )
     try:
-
         if evm.message.code_address in PRE_COMPILED_CONTRACTS:
-            evm_trace(evm, evm.message.code_address)
+            evm_trace(evm, PrecompileStart(evm.message.code_address))
             PRE_COMPILED_CONTRACTS[evm.message.code_address](evm)
+            evm_trace(evm, PrecompileEnd())
             return evm
 
-        while evm.running and evm.pc < len(evm.code):
+        while evm.running and evm.pc < ulen(evm.code):
             try:
                 op = Ops(evm.code[evm.pc])
             except ValueError:
                 raise InvalidOpcode(evm.code[evm.pc])
 
-            evm_trace(evm, op)
+            evm_trace(evm, OpStart(op))
             op_implementation[op](evm)
+            evm_trace(evm, OpEnd())
 
-    except ExceptionalHalt:
-        evm.gas_left = U256(0)
-        evm.has_erred = True
+        evm_trace(evm, EvmStop(Ops.STOP))
+
+    except ExceptionalHalt as error:
+        evm_trace(evm, OpException(error))
+        evm.gas_left = Uint(0)
+        evm.error = error
     return evm
-
-
-def collect_accounts_to_delete(evm: Evm) -> Set[Address]:
-    """
-    Collects all the accounts that were marked for deletion by the
-    `SELFDESTRUCT` opcode.
-
-    Parameters
-    ----------
-    evm :
-        The current EVM frame.
-
-    Returns
-    -------
-    accounts_to_delete: `set`
-        returns all the accounts need marked for deletion by the
-        `SELFDESTRUCT` opcode.
-    """
-    if evm.has_erred:
-        return set()
-    else:
-        return set(
-            chain(
-                evm.accounts_to_delete,
-                *(collect_accounts_to_delete(child) for child in evm.children),
-            )
-        )
-
-
-def calculate_gas_refund(evm: Evm) -> U256:
-    """
-    Adds up the gas that was refunded in each execution frame during the
-    message call.
-
-    Parameters
-    ----------
-    evm :
-        The current EVM frame.
-
-    Returns
-    -------
-    gas_refund: `ethereum.base_types.U256`
-        returns the total gas that needs to be refunded after executing the
-        message call.
-    """
-    if evm.has_erred:
-        return U256(0)
-    else:
-        return evm.refund_counter + sum(
-            calculate_gas_refund(child_evm) for child_evm in evm.children
-        )

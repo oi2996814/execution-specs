@@ -1,12 +1,11 @@
-from __future__ import annotations
-
 import json
 import os
 from importlib import import_module
-from typing import Any, List, TypeVar
+from typing import Any, List
 
-from ethereum import rlp
-from ethereum.base_types import U256, Uint, Uint64
+from ethereum_rlp import rlp
+from ethereum_types.numeric import U64, U256, Uint
+
 from ethereum.crypto.hash import keccak256
 from ethereum.utils.hexadecimal import (
     hex_to_bytes,
@@ -18,18 +17,17 @@ from ethereum.utils.hexadecimal import (
 
 class VmTestLoader:
     """
-    This class has all the methods and imports required to run
-    the VM tests
+    All the methods and imports required to run the VM tests.
     """
 
     def __init__(self, network: str, fork_name: str):
         self.network = network
         self.fork_name = fork_name
 
-        # Import relevant items from spec
-        self.spec = self._module("spec")
-        self.BlockChain = self.spec.BlockChain
-        self.get_last_256_block_hashes = self.spec.get_last_256_block_hashes
+        # Import relevant items from fork
+        self.fork = self._module("fork")
+        self.BlockChain = self.fork.BlockChain
+        self.get_last_256_block_hashes = self.fork.get_last_256_block_hashes
 
         self.state = self._module("state")
         self.State = self.state.State
@@ -38,9 +36,9 @@ class VmTestLoader:
         self.set_storage = self.state.set_storage
         self.storage_root = self.state.storage_root
 
-        self.eth_types = self._module("eth_types")
-        self.Account = self.eth_types.Account
-        self.Address = self.eth_types.Address
+        self.fork_types = self._module("fork_types")
+        self.Account = self.fork_types.Account
+        self.Address = self.fork_types.Address
 
         self.hexadecimal = self._module("utils.hexadecimal")
         self.hex_to_address = self.hexadecimal.hex_to_address
@@ -60,6 +58,9 @@ class VmTestLoader:
     def run_test(
         self, test_dir: str, test_file: str, check_gas_left: bool = True
     ) -> None:
+        """
+        Execute a test case and check its post state.
+        """
         test_data = self.load_test(test_dir, test_file)
         target = test_data["target"]
         env = test_data["env"]
@@ -90,11 +91,14 @@ class VmTestLoader:
                     test_data["expected_post_state"], addr
                 ) == self.storage_root(env.state, addr)
         else:
-            assert output.has_erred is True
+            assert output.error is not None
         self.close_state(env.state)
         self.close_state(test_data["expected_post_state"])
 
     def load_test(self, test_dir: str, test_file: str) -> Any:
+        """
+        Read tests from a file.
+        """
         test_name = os.path.splitext(test_file)[0]
         path = os.path.join(test_dir, test_file)
         with open(path, "r") as fp:
@@ -107,7 +111,7 @@ class VmTestLoader:
             "target": self.hex_to_address(json_data["exec"]["address"]),
             "data": hex_to_bytes(json_data["exec"]["data"]),
             "value": hex_to_u256(json_data["exec"]["value"]),
-            "gas": hex_to_u256(json_data["exec"]["gas"]),
+            "gas": hex_to_uint(json_data["exec"]["gas"]),
             "depth": Uint(0),
             "env": env,
             "expected_gas_left": hex_to_u256(json_data.get("gas", "0x64")),
@@ -122,7 +126,9 @@ class VmTestLoader:
         }
 
     def json_to_env(self, json_data: Any) -> Any:
-
+        """
+        Deserialize an `Environment` instance from JSON.
+        """
         caller_hex_address = json_data["exec"]["caller"]
         # Some tests don't have the caller state defined in the test case. Hence
         # creating a dummy caller state.
@@ -137,7 +143,7 @@ class VmTestLoader:
         chain = self.BlockChain(
             blocks=[],
             state=current_state,
-            chain_id=Uint64(1),
+            chain_id=U64(1),
         )
 
         return self.Environment(
@@ -151,11 +157,15 @@ class VmTestLoader:
             time=hex_to_u256(json_data["env"]["currentTimestamp"]),
             difficulty=hex_to_uint(json_data["env"]["currentDifficulty"]),
             state=current_state,
+            traces=[],
         )
 
     def json_to_state(self, raw: Any) -> Any:
+        """
+        Deserialize a `State` from JSON.
+        """
         state = self.State()
-        for (addr_hex, acc_state) in raw.items():
+        for addr_hex, acc_state in raw.items():
             addr = self.hex_to_address(addr_hex)
             account = self.Account(
                 nonce=hex_to_uint(acc_state.get("nonce", "0x0")),
@@ -164,7 +174,7 @@ class VmTestLoader:
             )
             self.set_account(state, addr, account)
 
-            for (k, v) in acc_state.get("storage", {}).items():
+            for k, v in acc_state.get("storage", {}).items():
                 self.set_storage(
                     state,
                     addr,
@@ -177,15 +187,21 @@ class VmTestLoader:
         return state
 
     def json_to_addrs(self, raw: Any) -> List[Any]:
+        """
+        Deserialize a list of `Address` from JSON.
+        """
         addrs = []
         for addr_hex in raw:
             addrs.append(self.hex_to_address(addr_hex))
         return addrs
 
     def get_dummy_account_state(self, min_balance: str) -> Any:
+        """
+        Initial state for the dummy account.
+        """
         # dummy account balance is the min balance needed plus 1 eth for gas
         # cost
-        account_balance = hex_to_uint(min_balance) + (10**18)
+        account_balance = hex_to_uint(min_balance) + Uint(10**18)
 
         return {
             "balance": hex(account_balance),

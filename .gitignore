@@ -47,8 +47,13 @@ pip-delete-this-directory.txt
 .tox/
 
 /doc/_autosummary
+/docs
 
 .coverage
 
 /doc/diffs
 /doc/autoapi
+
+tests/execution-spec-generated-tests
+tests/fixtures
+tests/t8n_testdata

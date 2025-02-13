@@ -12,10 +12,10 @@ Introduction
 Implementations of the EVM block instructions.
 """
 
-from ethereum.base_types import U256
+from ethereum_types.numeric import U256, Uint
 
 from .. import Evm
-from ..gas import GAS_BASE, GAS_BLOCK_HASH, subtract_gas
+from ..gas import GAS_BASE, GAS_BLOCK_HASH, charge_gas
 from ..stack import pop, push
 
 
@@ -29,18 +29,16 @@ def block_hash(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.frontier.vm.exceptions.StackUnderflowError`
-        If `len(stack)` is less than `1`.
-    :py:class:`~ethereum.frontier.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `20`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_BLOCK_HASH)
+    # STACK
+    block_number = Uint(pop(evm.stack))
 
-    block_number = pop(evm.stack)
+    # GAS
+    charge_gas(evm, GAS_BLOCK_HASH)
 
-    if evm.env.number <= block_number or evm.env.number > block_number + 256:
+    # OPERATION
+    max_block_number = block_number + Uint(256)
+    if evm.env.number <= block_number or evm.env.number > max_block_number:
         # Default hash to 0, if the block of interest is not yet on the chain
         # (including the block which has the current executing transaction),
         # or if the block's age is more than 256.
@@ -50,7 +48,8 @@ def block_hash(evm: Evm) -> None:
 
     push(evm.stack, U256.from_be_bytes(hash))
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def coinbase(evm: Evm) -> None:
@@ -66,17 +65,18 @@ def coinbase(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.frontier.vm.exceptions.StackOverflowError`
-        If `len(stack)` is equal to `1024`.
-    :py:class:`~ethereum.frontier.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `2`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_BASE)
+    # STACK
+    pass
+
+    # GAS
+    charge_gas(evm, GAS_BASE)
+
+    # OPERATION
     push(evm.stack, U256.from_be_bytes(evm.env.coinbase))
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def timestamp(evm: Evm) -> None:
@@ -92,17 +92,18 @@ def timestamp(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.frontier.vm.exceptions.StackOverflowError`
-        If `len(stack)` is equal to `1024`.
-    :py:class:`~ethereum.frontier.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `2`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_BASE)
+    # STACK
+    pass
+
+    # GAS
+    charge_gas(evm, GAS_BASE)
+
+    # OPERATION
     push(evm.stack, evm.env.time)
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def number(evm: Evm) -> None:
@@ -117,17 +118,18 @@ def number(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.frontier.vm.exceptions.StackOverflowError`
-        If `len(stack)` is equal to `1024`.
-    :py:class:`~ethereum.frontier.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `2`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_BASE)
+    # STACK
+    pass
+
+    # GAS
+    charge_gas(evm, GAS_BASE)
+
+    # OPERATION
     push(evm.stack, U256(evm.env.number))
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def difficulty(evm: Evm) -> None:
@@ -142,17 +144,18 @@ def difficulty(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.frontier.vm.exceptions.StackOverflowError`
-        If `len(stack)` is equal to `1024`.
-    :py:class:`~ethereum.frontier.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `2`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_BASE)
+    # STACK
+    pass
+
+    # GAS
+    charge_gas(evm, GAS_BASE)
+
+    # OPERATION
     push(evm.stack, U256(evm.env.difficulty))
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)
 
 
 def gas_limit(evm: Evm) -> None:
@@ -167,14 +170,15 @@ def gas_limit(evm: Evm) -> None:
     evm :
         The current EVM frame.
 
-    Raises
-    ------
-    :py:class:`~ethereum.frontier.vm.exceptions.StackOverflowError`
-        If `len(stack)` is equal to `1024`.
-    :py:class:`~ethereum.frontier.vm.exceptions.OutOfGasError`
-        If `evm.gas_left` is less than `2`.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_BASE)
+    # STACK
+    pass
+
+    # GAS
+    charge_gas(evm, GAS_BASE)
+
+    # OPERATION
     push(evm.stack, U256(evm.env.gas_limit))
 
-    evm.pc += 1
+    # PROGRAM COUNTER
+    evm.pc += Uint(1)

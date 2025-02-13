@@ -1,14 +1,10 @@
 import pytest
+from ethereum_rlp import rlp
+from ethereum_types.bytes import Bytes, Bytes0, Bytes8
+from ethereum_types.numeric import U256, Uint
 
-import ethereum.rlp as rlp
-from ethereum.base_types import U256, Bytes, Bytes0, Bytes8, Uint
-from ethereum.constantinople.eth_types import (
-    Block,
-    Header,
-    Log,
-    Receipt,
-    Transaction,
-)
+from ethereum.constantinople.blocks import Block, Header, Log, Receipt
+from ethereum.constantinople.transactions import Transaction
 from ethereum.constantinople.utils.hexadecimal import hex_to_address
 from ethereum.crypto.hash import keccak256
 from ethereum.utils.hexadecimal import hex_to_bytes256
@@ -39,8 +35,8 @@ bloom = hex_to_bytes256(
 
 transaction1 = Transaction(
     U256(1),
-    U256(2),
-    U256(3),
+    Uint(2),
+    Uint(3),
     Bytes0(),
     U256(4),
     Bytes(b"foo"),
@@ -51,8 +47,8 @@ transaction1 = Transaction(
 
 transaction2 = Transaction(
     U256(1),
-    U256(2),
-    U256(3),
+    Uint(2),
+    Uint(3),
     Bytes0(),
     U256(4),
     Bytes(b"foo"),
@@ -109,6 +105,6 @@ receipt = Receipt(
     "rlp_object",
     [transaction1, transaction2, header, block, log1, log2, receipt],
 )
-def test_constantinople_rlp(rlp_object: rlp.RLP) -> None:
+def test_constantinople_rlp(rlp_object: rlp.Extended) -> None:
     encoded = rlp.encode(rlp_object)
     assert rlp.decode_to(type(rlp_object), encoded) == rlp_object

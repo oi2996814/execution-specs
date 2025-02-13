@@ -1,5 +1,5 @@
 """
-Frontier Utility Functions For Addresses
+Hardfork Utility Functions For Addresses
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. contents:: Table of Contents
@@ -13,12 +13,13 @@ Address specific functions used in this frontier version of specification.
 """
 from typing import Union
 
-from ethereum.base_types import U256, Uint
+from ethereum_rlp import rlp
+from ethereum_types.numeric import U256, Uint
+
 from ethereum.crypto.hash import keccak256
 from ethereum.utils.byte import left_pad_zero_bytes
 
-from ... import rlp
-from ..eth_types import Address
+from ..fork_types import Address
 
 
 def to_address(data: Union[Uint, U256]) -> Address:
@@ -52,7 +53,7 @@ def compute_contract_address(address: Address, nonce: Uint) -> Address:
 
     Returns
     -------
-    address: `ethereum.frontier.eth_types.Address`
+    address: `ethereum.frontier.fork_types.Address`
         The computed address of the new account.
     """
     computed_address = keccak256(rlp.encode([address, nonce]))

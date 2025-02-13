@@ -11,13 +11,15 @@ Introduction
 
 Implementation of the ECRECOVER precompiled contract.
 """
-from ethereum.base_types import U256
+from ethereum_types.numeric import U256
+
 from ethereum.crypto.elliptic_curve import SECP256K1N, secp256k1_recover
 from ethereum.crypto.hash import Hash32, keccak256
-from ethereum.utils.byte import left_pad_zero_bytes, right_pad_zero_bytes
+from ethereum.utils.byte import left_pad_zero_bytes
 
 from ...vm import Evm
-from ...vm.gas import GAS_ECRECOVER, subtract_gas
+from ...vm.gas import GAS_ECRECOVER, charge_gas
+from ...vm.memory import buffer_read
 
 
 def ecrecover(evm: Evm) -> None:
@@ -30,26 +32,27 @@ def ecrecover(evm: Evm) -> None:
     evm :
         The current EVM frame.
     """
-    evm.gas_left = subtract_gas(evm.gas_left, GAS_ECRECOVER)
-    data = right_pad_zero_bytes(evm.message.data, 128)
-    message_hash_bytes = data[:32]
-    message_hash = Hash32(message_hash_bytes)
-    v_bytes = data[32:64]
-    v = U256.from_be_bytes(v_bytes)
-    r_bytes = data[64:96]
-    r = U256.from_be_bytes(r_bytes)
-    s_bytes = data[96:128]
-    s = U256.from_be_bytes(s_bytes)
+    data = evm.message.data
 
-    if v != 27 and v != 28:
+    # GAS
+    charge_gas(evm, GAS_ECRECOVER)
+
+    # OPERATION
+    message_hash_bytes = buffer_read(data, U256(0), U256(32))
+    message_hash = Hash32(message_hash_bytes)
+    v = U256.from_be_bytes(buffer_read(data, U256(32), U256(32)))
+    r = U256.from_be_bytes(buffer_read(data, U256(64), U256(32)))
+    s = U256.from_be_bytes(buffer_read(data, U256(96), U256(32)))
+
+    if v != U256(27) and v != U256(28):
         return
-    if 0 >= r or r >= SECP256K1N:
+    if U256(0) >= r or r >= SECP256K1N:
         return
-    if 0 >= s or s >= SECP256K1N:
+    if U256(0) >= s or s >= SECP256K1N:
         return
 
     try:
-        public_key = secp256k1_recover(r, s, v - 27, message_hash)
+        public_key = secp256k1_recover(r, s, v - U256(27), message_hash)
     except ValueError:
         # unable to extract public key
         return

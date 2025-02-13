@@ -3,9 +3,9 @@ import pkgutil
 from typing import Any, Dict, List, cast
 
 import pytest
+from ethereum_rlp import rlp
+from ethereum_types.numeric import Uint
 
-from ethereum import rlp
-from ethereum.base_types import Uint
 from ethereum.crypto.hash import keccak256
 from ethereum.ethash import (
     cache_size,
@@ -14,8 +14,8 @@ from ethereum.ethash import (
     generate_seed,
     hashimoto_light,
 )
-from ethereum.tangerine_whistle.eth_types import Header
-from ethereum.tangerine_whistle.spec import (
+from ethereum.tangerine_whistle.blocks import Header
+from ethereum.tangerine_whistle.fork import (
     generate_header_hash_for_pow,
     validate_proof_of_work,
 )
@@ -25,8 +25,10 @@ from ethereum.utils.hexadecimal import (
     hex_to_bytes32,
 )
 from ethereum.utils.numeric import le_uint32_sequence_to_bytes
+from tests.helpers import TEST_FIXTURES
+from tests.helpers.load_state_tests import Load
 
-from ..helpers.load_state_tests import Load
+ETHEREUM_TESTS_PATH = TEST_FIXTURES["ethereum_tests"]["fixture_path"]
 
 
 def test_ethtest_fixtures() -> None:
@@ -59,7 +61,7 @@ def test_ethtest_fixtures() -> None:
 
 def load_pow_test_fixtures() -> List[Dict[str, Any]]:
     with open(
-        "tests/fixtures/PoWTests/ethash_tests.json"
+        f"{ETHEREUM_TESTS_PATH}/PoWTests/ethash_tests.json"
     ) as pow_test_file_handler:
         return [
             {

@@ -1,8 +1,7 @@
 """
-Ethereum Frontier Hardfork
-^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-The first Ethereum hardfork.
+Frontier is the first production-ready iteration of the Ethereum protocol.
 """
 
-MAINNET_FORK_BLOCK = 0
+from ethereum.fork_criteria import ByBlockNumber
+
+FORK_CRITERIA = ByBlockNumber(0)
